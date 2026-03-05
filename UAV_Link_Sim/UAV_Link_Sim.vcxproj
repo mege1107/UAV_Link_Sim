@@ -116,10 +116,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>D:\UHD\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>D:\UHD\lib</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies);uhd.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -128,10 +131,12 @@
     <ClInclude Include="common_defs.h" />
     <ClInclude Include="frequency_hop.h" />
     <ClInclude Include="modulation.h" />
+    <ClInclude Include="radio_if.h" />
     <ClInclude Include="receiver.h" />
     <ClInclude Include="spread_spectrum.h" />
     <ClInclude Include="sync.h" />
     <ClInclude Include="transmitter.h" />
+    <ClInclude Include="usrp_driver.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <ItemGroup>
@@ -140,10 +145,14 @@
     <ClCompile Include="frequency_hop.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="modulation.cpp" />
+    <ClCompile Include="radio_awgn.cpp" />
+    <ClCompile Include="radio_loopback.cpp" />
+    <ClCompile Include="radio_usrp.cpp" />
     <ClCompile Include="receiver.cpp" />
     <ClCompile Include="spread_spectrum.cpp" />
     <ClCompile Include="sync.cpp" />
     <ClCompile Include="transmitter.cpp" />
+    <ClCompile Include="usrp_driver.cpp" />
     <ClCompile Include="utils.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

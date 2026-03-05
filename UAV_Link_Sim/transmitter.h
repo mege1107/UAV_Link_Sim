@@ -23,7 +23,7 @@ public:
         const VecComplex& signal);
 
     // ==============================
-    // 外部查询接口（工程推荐）
+    // 外部查询接口
     // ==============================
     double getFS() const { return config_.fs; }
     const TransmitterConfig& getConfig() const { return config_; }

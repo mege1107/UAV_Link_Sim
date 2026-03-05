@@ -45,6 +45,12 @@
     <ClInclude Include="receiver.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="usrp_driver.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="radio_if.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="utils.cpp">
@@ -75,6 +81,18 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="receiver.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="usrp_driver.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="radio_awgn.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="radio_loopback.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="radio_usrp.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
