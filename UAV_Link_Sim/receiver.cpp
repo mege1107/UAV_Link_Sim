@@ -13,41 +13,70 @@ static inline Complex cexpj(double a) {
     return Complex(std::cos(a), std::sin(a));
 }
 
-// ====================== 归一化滑动相关同步检测 ======================
-static bool findSyncStartNormalized(
+// =============== 归一化相关 metric（给定绝对位置） ===============
+static double metricAtNormalized(
     const VecComplex& rx,
-    const VecComplex& sync,
-    int& best_idx,
-    double& best_metric,
-    int max_search_len = -1
+    size_t abs_idx,
+    const VecComplex& sync
 ) {
-    if (rx.size() < sync.size() || sync.empty()) return false;
+    const size_t N = rx.size();
+    const size_t M = sync.size();
+    if (M == 0 || abs_idx + M > N) return -1.0;
 
-    const int N = (int)rx.size();
-    const int M = (int)sync.size();
-    const int K = (max_search_len < 0) ? (N - M) : std::min(N - M, max_search_len);
+    Complex dot(0.0, 0.0);
+    double Es = 0.0, Er = 0.0;
 
-    double Es = 0.0;
-    for (const auto& s : sync) Es += std::norm(s);
-    if (Es <= 1e-12) return false;
+    for (size_t k = 0; k < M; ++k) {
+        const auto& s = sync[k];
+        const auto& r = rx[abs_idx + k];
+        dot += std::conj(s) * r;
+        Es += std::norm(s);
+        Er += std::norm(r);
+    }
+    if (Es <= 1e-12 || Er <= 1e-12) return -1.0;
+    return std::norm(dot) / (Es * Er);
+}
+
+// =============== 窄窗内滑动找最大相关 ===============
+static bool findSyncStartNormalizedWindow(
+    const VecComplex& rx,
+    size_t win_start,
+    size_t win_end, // [start, end)
+    const VecComplex& sync,
+    int& best_rel_idx,
+    double& best_metric
+) {
+    const size_t N = rx.size();
+    const size_t M = sync.size();
+    if (M == 0) return false;
+    if (win_start >= win_end) return false;
+    if (win_end > N) win_end = N;
+    if (win_start + M > win_end) return false;
 
     best_metric = -1.0;
-    best_idx = 0;
+    best_rel_idx = 0;
 
-    for (int i = 0; i <= K; ++i) {
+    // 只在窗口内扫描：abs = win_start + i
+    const size_t K = (win_end - win_start) - M;
+    for (size_t i = 0; i <= K; ++i) {
+        const size_t abs_idx = win_start + i;
+
         Complex dot(0.0, 0.0);
-        double Er = 0.0;
+        double Es = 0.0, Er = 0.0;
 
-        for (int k = 0; k < M; ++k) {
-            dot += std::conj(sync[(size_t)k]) * rx[(size_t)i + (size_t)k];
-            Er += std::norm(rx[(size_t)i + (size_t)k]);
+        for (size_t k = 0; k < M; ++k) {
+            const auto& s = sync[k];
+            const auto& r = rx[abs_idx + k];
+            dot += std::conj(s) * r;
+            Es += std::norm(s);
+            Er += std::norm(r);
         }
-        if (Er <= 1e-12) continue;
+        if (Es <= 1e-12 || Er <= 1e-12) continue;
 
         double metric = std::norm(dot) / (Es * Er);
         if (metric > best_metric) {
             best_metric = metric;
-            best_idx = i;
+            best_rel_idx = (int)i; // 相对 win_start
         }
     }
     return best_metric > 0.0;
@@ -130,7 +159,7 @@ void Receiver::linearFitLSQ(const std::vector<int>& x,
     if (!std::isfinite(out_b)) out_b = 0.0;
 }
 
-// ====================== 残余固定相位估计 ======================
+// ====================== 残余相位估计 ======================
 double Receiver::estimateResidualPhase(const VecComplex& rx_preamble,
     const VecComplex& local_preamble)
 {
@@ -154,7 +183,7 @@ void Receiver::resetFreqHistory() {
     frame_count_ = 0;
 }
 
-// ====================== 主接收函数 ======================
+// ====================== 主接收函数（锁帧+窄窗同步） ======================
 VecInt Receiver::receive(const VecComplex& rx_signal)
 {
     const double fs = config_.fs;
@@ -196,66 +225,81 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const size_t total_rx_len = rx_signal.size();
     const double sync_threshold = 0.08;
 
+    // 窄窗宽度：默认 ±2*samp（足够覆盖采样相位/轻微抖动）
+    const size_t W = (size_t)(2 * std::max(1, config_.samp));
+
     while (current_offset + (size_t)single_frame_total_samp <= total_rx_len) {
-        VecComplex current_segment(rx_signal.begin() + current_offset, rx_signal.end());
 
-        int sync_rel_idx = 0;
-        double sync_metric = 0.0;
+        // ====== 先“锁帧”：优先检查期望点 current_offset ======
+        size_t sync_abs_start = current_offset;
+        double sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
 
-        int max_search = std::min((int)current_segment.size() - sync_len, 2 * single_frame_total_samp);
-        if (!findSyncStartNormalized(current_segment, SYNC, sync_rel_idx, sync_metric, max_search)) {
-            std::cout << "[Receiver] 未检测到有效同步头，解调结束\n";
-            break;
+        bool ok = (sync_metric >= sync_threshold);
+
+        // ====== 若期望点不够强，再窄窗搜索兜底 ======
+        if (!ok) {
+            size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
+            size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
+
+            int best_rel = 0;
+            double best_m = 0.0;
+            if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
+                std::cout << "[Receiver] 未检测到有效同步头，解调结束\n";
+                break;
+            }
+            sync_abs_start = win_start + (size_t)best_rel;
+            sync_metric = best_m;
+            ok = (sync_metric >= sync_threshold);
         }
-        if (sync_metric < sync_threshold) {
+
+        if (!ok) {
             std::cout << "[Receiver] 同步峰值过低(" << sync_metric << ")，解调结束\n";
             break;
         }
 
-        const size_t sync_abs_start = current_offset + (size_t)sync_rel_idx;
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
         if (frame_abs_end > total_rx_len) break;
 
+        // drift 打印：观察是否还会跳帧
+        std::cout << "[DBG] current_offset=" << current_offset
+            << " sync_abs_start=" << sync_abs_start
+            << " drift=" << (long long)sync_abs_start - (long long)current_offset
+            << " metric=" << sync_metric
+            << "\n";
+
         VecComplex current_frame(rx_signal.begin() + sync_abs_start, rx_signal.begin() + frame_abs_end);
 
-        // ====== CFO + 相位校正（受开关控制）======
-        double f_hat = 0.0;
-        if (config_.enable_cfo) {
-            VecComplex rx_fine_sync(current_frame.begin() + (sync_len - fine_sync_len),
-                current_frame.begin() + sync_len);
+        // ====== CFO + 相位校正（如果你有 enable_cfo 开关就放条件里）======
+        VecComplex rx_fine_sync(current_frame.begin() + (sync_len - fine_sync_len),
+            current_frame.begin() + sync_len);
 
-            double frame_freq_offset = estimateCFOFromPreamble(rx_fine_sync, sync_fine, fs);
-            frame_count_++;
+        double frame_freq_offset = estimateCFOFromPreamble(rx_fine_sync, sync_fine, fs);
+        frame_count_++;
 
-            frame_index_history_.push_back(frame_count_);
-            freq_offset_history_.push_back(frame_freq_offset);
+        frame_index_history_.push_back(frame_count_);
+        freq_offset_history_.push_back(frame_freq_offset);
 
-            linearFitLSQ(frame_index_history_, freq_offset_history_, fit_a_, fit_b_);
-            f_hat = fit_a_ * frame_count_ + fit_b_;
-            if (!std::isfinite(f_hat)) f_hat = 0.0;
+        linearFitLSQ(frame_index_history_, freq_offset_history_, fit_a_, fit_b_);
+        double f_hat = fit_a_ * frame_count_ + fit_b_;
+        if (!std::isfinite(f_hat)) f_hat = 0.0;
 
-            if (f_hat != 0.0) {
-                for (size_t n = 0; n < current_frame.size(); ++n) {
-                    double t = (double)n / fs;
-                    double ang = 2 * PI * f_hat * t;
-                    if (!std::isfinite(ang)) continue;
-                    current_frame[n] *= std::conj(cexpj(ang));
-                }
-            }
-
-            VecComplex rx_fine_sync_corrected(current_frame.begin() + (sync_len - fine_sync_len),
-                current_frame.begin() + sync_len);
-            double residual_phase = estimateResidualPhase(rx_fine_sync_corrected, sync_fine);
-            if (!std::isfinite(residual_phase)) residual_phase = 0.0;
-
-            if (residual_phase != 0.0) {
-                Complex rot = std::conj(cexpj(residual_phase));
-                for (auto& samp : current_frame) samp *= rot;
+        if (f_hat != 0.0) {
+            for (size_t n = 0; n < current_frame.size(); ++n) {
+                double t = (double)n / fs;
+                double ang = 2 * PI * f_hat * t;
+                if (!std::isfinite(ang)) continue;
+                current_frame[n] *= std::conj(cexpj(ang));
             }
         }
-        else {
-            // CFO关闭时：仍然计帧数用于日志
-            frame_count_++;
+
+        VecComplex rx_fine_sync_corrected(current_frame.begin() + (sync_len - fine_sync_len),
+            current_frame.begin() + sync_len);
+        double residual_phase = estimateResidualPhase(rx_fine_sync_corrected, sync_fine);
+        if (!std::isfinite(residual_phase)) residual_phase = 0.0;
+
+        if (residual_phase != 0.0) {
+            Complex rot = std::conj(cexpj(residual_phase));
+            for (auto& samp : current_frame) samp *= rot;
         }
 
         // 4) payload 截取并裁 ZP
@@ -274,11 +318,11 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         std::cout << "[Receiver] 第" << frame_count_
             << "帧解调完成，同步峰值：" << sync_metric
-            << "，频偏估计：" << (config_.enable_cfo ? f_hat : 0.0) << "Hz"
+            << "，频偏估计：" << f_hat << "Hz"
             << "，解调比特数：" << rs_decoded.size()
-            << (config_.enable_cfo ? "" : " (CFO disabled)")
             << std::endl;
 
+        // 关键：下一帧期望起点 = 本帧末尾（锁帧）
         current_offset = frame_abs_end;
     }
 
@@ -294,16 +338,13 @@ VecInt Receiver::demodulateBPSK(const VecComplex& rx)
     for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
         int best_j = 0;
         double best_e = -1.0;
-
         for (int j = 0; j < s; ++j) {
             double e = std::norm(rx[base + (size_t)j]);
             if (e > best_e) { best_e = e; best_j = j; }
         }
-
         double val = rx[base + (size_t)best_j].real();
         bits.push_back(val > 0 ? 1 : 0);
     }
-
     return bits;
 }
 
@@ -334,6 +375,5 @@ VecInt Receiver::despreadCCSK(const VecInt& chips)
             decoded.push_back((best_k >> b) & 1);
         }
     }
-
     return decoded;
 }

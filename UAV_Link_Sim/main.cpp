@@ -103,7 +103,7 @@ int main() {
     // ========= TX循环发送参数 =========
     const int tx_repeat_frames = 30;  // 发 30 帧（未来USRP时很关键）
     const int rx_capture_frames = 10; // 接收窗口按“帧数倍数”来抓（越大越稳，越大越慢）
-    const double awgn_snr_db = -5.0;
+    const double awgn_snr_db = 80.0;
 
     // ========= 配置 =========
     TransmitterConfig cfg;

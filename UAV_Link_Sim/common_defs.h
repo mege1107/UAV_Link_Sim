@@ -44,7 +44,7 @@ enum class ModulationType {
 // 发射端配置结构体
 struct TransmitterConfig {
     // 可选参数
-    bool enable_cfo = 0;   // 是否启用接收端 CFO 估计与补偿
+    bool enable_cfo = 1;   // 是否启用接收端 CFO 估计与补偿
     bool connect = false;                  // 是否连接USRP
     double Rb = 50e3;                      // 信息速率 (4K~200K)
     FunctionType function = FunctionType::RemoteControl;  // 功能类型
