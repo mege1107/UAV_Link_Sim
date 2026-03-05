@@ -97,13 +97,13 @@ enum class LinkMode { LOOPBACK, AWGN, USRP };
 int main() {
     // ========= 模式选择（没B210先用 LOOPBACK / AWGN）=========
     LinkMode mode = LinkMode::AWGN;
-    // LinkMode mode = LinkMode::LOOPBACK;
+    //LinkMode mode = LinkMode::LOOPBACK;
     // LinkMode mode = LinkMode::USRP;
 
     // ========= TX循环发送参数 =========
     const int tx_repeat_frames = 30;  // 发 30 帧（未来USRP时很关键）
     const int rx_capture_frames = 10; // 接收窗口按“帧数倍数”来抓（越大越稳，越大越慢）
-    const double awgn_snr_db = -10.0;
+    const double awgn_snr_db = -5.0;
 
     // ========= 配置 =========
     TransmitterConfig cfg;
@@ -114,12 +114,19 @@ int main() {
     cfg.samp = 8;
     cfg.connect = (mode == LinkMode::USRP);
 
+    // ========= 先构造 TX =========
     Transmitter tx(cfg);
-    Receiver rx(cfg);
 
-    // ========= 生成“单帧”基带 =========
+    // ========= 生成“单帧”基带（此时 TX 内部通常会确定 fs）=========
     VecComplex one_frame_sig = tx.generateTransmitSignal();
     VecInt one_frame_bits = tx.getLastSourceBits();
+
+    // ========= 关键：把 TX 内部算出的 fs 写回到共享 cfg =========
+    // 这样 Receiver（持有 cfg 引用）才能拿到正确 fs
+    cfg.fs = tx.getFS();
+
+    // ========= 再构造 RX（方案一：Receiver 内部引用 cfg）=========
+    Receiver rx(cfg);
 
     std::cout << "One-frame bits: " << one_frame_bits.size()
         << ", samples: " << one_frame_sig.size()
@@ -176,8 +183,6 @@ int main() {
     std::cout << "RX captured samples: " << rx_sig.size() << "\n";
 
     // ========= 解调恢复 =========
-    // 说明：这里 rx.receive() 目前大概率只会解出“某一帧”（或解一段），
-    // 将来USRP阶段我们会改成：在 rx_sig 里循环找多帧、统计 PER/BER。
     VecInt rx_bits = rx.receive(rx_sig);
 
     // ========= 打印 & BER（先对齐前 min 长度）=========
@@ -191,6 +196,32 @@ int main() {
     std::cout << "Compared bits: " << std::min(one_frame_bits.size(), rx_bits.size()) << "\n";
     std::cout << "Bit errors: " << bit_errors << "\n";
     std::cout << "BER = " << std::setprecision(6) << ber << "\n";
+
+    // ========= 多帧BER统计 =========
+    size_t total_bit_errors = 0;
+    size_t total_compared_bits = 0;
+    double average_ber = 0.0;
+
+    const int bits_per_frame = (int)one_frame_bits.size();
+    const int total_rx_frames = (bits_per_frame > 0) ? (int)(rx_bits.size() / (size_t)bits_per_frame) : 0;
+
+    if (total_rx_frames > 0 && bits_per_frame > 0) {
+        for (int i = 0; i < total_rx_frames; ++i) {
+            size_t frame_errors = 0;
+            size_t frame_start = (size_t)i * (size_t)bits_per_frame;
+            VecInt rx_frame(rx_bits.begin() + frame_start,
+                rx_bits.begin() + frame_start + (size_t)bits_per_frame);
+            compute_ber(one_frame_bits, rx_frame, frame_errors);
+            total_bit_errors += frame_errors;
+            total_compared_bits += (size_t)bits_per_frame;
+        }
+        average_ber = (double)total_bit_errors / (double)total_compared_bits;
+    }
+
+    std::cout << "Total decoded frames: " << total_rx_frames << "\n";
+    std::cout << "Total compared bits: " << total_compared_bits << "\n";
+    std::cout << "Total bit errors: " << total_bit_errors << "\n";
+    std::cout << "Average BER = " << std::setprecision(6) << average_ber << "\n";
 
     return 0;
 }

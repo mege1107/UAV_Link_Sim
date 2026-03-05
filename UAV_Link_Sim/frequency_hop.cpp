@@ -2,8 +2,6 @@
 #include <random>
 #include <cmath>
 
-const double PI = 3.14159265358979323846;
-
 // 生成跳频序列 (简单伪随机实现)
 VecDouble generate_sequence(int min_freq, int max_freq, int step, int length, int seed) {
     VecDouble seq;

@@ -5,8 +5,6 @@
 #include <algorithm>
 #include <stdexcept>
 
-const double PI = 3.14159265358979323846;
-
 // MSK调制 (简化版，对应MATLAB mskmod)
 VecComplex mskmod(const VecInt& bits, int samp) {
     VecComplex tx;

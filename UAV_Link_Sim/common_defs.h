@@ -3,6 +3,20 @@
 #include <vector>
 #include <complex>
 #include <string>
+#include <cmath>
+
+// ====================== 修复1：跨平台PI常量定义 ======================
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+constexpr double PI = M_PI; // 统一全局PI常量，兼容原有代码的PI/M_PI两种写法
+
+// ====================== 修复2：兼容C++11的clamp模板函数 ======================
+// 完全替代std::clamp，无需C++17支持，全编译器兼容
+template <typename T>
+inline T clamp_value(T x, T lo, T hi) {
+    return (x < lo) ? lo : (x > hi ? hi : x);
+}
 
 // 类型别名
 using Complex = std::complex<double>;
@@ -30,6 +44,7 @@ enum class ModulationType {
 // 发射端配置结构体
 struct TransmitterConfig {
     // 可选参数
+    bool enable_cfo = 0;   // 是否启用接收端 CFO 估计与补偿
     bool connect = false;                  // 是否连接USRP
     double Rb = 50e3;                      // 信息速率 (4K~200K)
     FunctionType function = FunctionType::RemoteControl;  // 功能类型
