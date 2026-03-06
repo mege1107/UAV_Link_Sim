@@ -49,11 +49,13 @@ public:
         buf_ = samples;
         return samples.size();
     }
+
     size_t recv_samples(size_t nsamps, VecComplex& out) override {
         if (nsamps >= buf_.size()) out = buf_;
         else out.assign(buf_.begin(), buf_.begin() + nsamps);
         return out.size();
     }
+
 private:
     VecComplex buf_;
 };
@@ -73,6 +75,7 @@ public:
         else out.assign(rx.begin(), rx.begin() + nsamps);
         return out.size();
     }
+
 private:
     double snr_db_;
     VecComplex last_tx_;
@@ -81,12 +84,21 @@ private:
 #ifdef WITH_UHD
 class USRPRadio final : public IRadio {
 public:
-    explicit USRPRadio(const USRPDriver::Config& cfg) : usrp_(cfg) { usrp_.init(); }
+    explicit USRPRadio(const USRPDriver::Config& cfg) : usrp_(cfg) {
+        usrp_.init();
+    }
+
     void start_rx() override { usrp_.start_rx_now(); }
     void stop_rx() override { usrp_.stop_rx(); }
 
-    size_t send_burst(const VecComplex& samples) override { return usrp_.send_burst(samples); }
-    size_t recv_samples(size_t nsamps, VecComplex& out) override { return usrp_.recv_samples(nsamps, out); }
+    size_t send_burst(const VecComplex& samples) override {
+        return usrp_.send_burst(samples);
+    }
+
+    size_t recv_samples(size_t nsamps, VecComplex& out) override {
+        return usrp_.recv_samples(nsamps, out);
+    }
+
 private:
     USRPDriver usrp_;
 };
@@ -95,56 +107,52 @@ private:
 enum class LinkMode { LOOPBACK, AWGN, USRP };
 
 int main() {
-    // ========= 模式选择（没B210先用 LOOPBACK / AWGN）=========
+    // =========================
+    // 模式选择
+    // =========================
     LinkMode mode = LinkMode::AWGN;
     //LinkMode mode = LinkMode::LOOPBACK;
     // LinkMode mode = LinkMode::USRP;
 
-    // ========= TX循环发送参数 =========
-    const int tx_repeat_frames = 30;  // 发 30 帧（未来USRP时很关键）
-    const int rx_capture_frames = 10; // 接收窗口按“帧数倍数”来抓（越大越稳，越大越慢）
-    const double awgn_snr_db = 0.0;
+    const int tx_repeat_frames = 30;
+    const int rx_capture_frames = 10;
+    const double awgn_snr_db = 20.0;
 
-    // ========= 配置 =========
+    // =========================
+    // 配置
+    // =========================
     TransmitterConfig cfg;
-    cfg.function = FunctionType::Telemetry;
-    //cfg.modulation = ModulationType::BPSK; //FM不兼容，不要用
-    cfg.modulation = ModulationType::QPSK;
-    //cfg.modulation = ModulationType::QAM;
-    //cfg.modulation = ModulationType::OOK;
-    //cfg.modulation = ModulationType::FSK;
-   // cfg.modulation = ModulationType::FM;
+    cfg.function = FunctionType::RemoteControl;
+    cfg.modulation = ModulationType::MSK;
+
     cfg.n = 10;
     cfg.frame_bit = 75;
     cfg.samp = 8;
+    cfg.zp_sym = 33;
     cfg.connect = (mode == LinkMode::USRP);
 
-    // ========= 先构造 TX =========
+    // =========================
+    // TX / RX
+    // =========================
     Transmitter tx(cfg);
 
-    // ========= 生成“单帧”基带（此时 TX 内部通常会确定 fs）=========
     VecComplex one_frame_sig = tx.generateTransmitSignal();
     VecInt one_frame_bits = tx.getLastSourceBits();
 
-    // ========= 关键：把 TX 内部算出的 fs 写回到共享 cfg =========
-    // 这样 Receiver（持有 cfg 引用）才能拿到正确 fs
     cfg.fs = tx.getFS();
 
-    // ========= 再构造 RX（方案一：Receiver 内部引用 cfg）=========
     Receiver rx(cfg);
 
     std::cout << "One-frame bits: " << one_frame_bits.size()
         << ", samples: " << one_frame_sig.size()
         << ", fs: " << tx.getFS() << " Hz\n";
 
-    // ========= 构造“循环发送 burst” =========
     VecComplex tx_burst;
     tx_burst.reserve((size_t)tx_repeat_frames * one_frame_sig.size());
     for (int i = 0; i < tx_repeat_frames; ++i) {
         tx_burst.insert(tx_burst.end(), one_frame_sig.begin(), one_frame_sig.end());
     }
 
-    // ========= 选择 radio =========
     std::unique_ptr<IRadio> radio;
 
     if (mode == LinkMode::LOOPBACK) {
@@ -169,16 +177,18 @@ int main() {
         uc.rx_gain = 20;
         uc.tx_antenna = "TX/RX";
         uc.rx_antenna = "RX2";
+
         radio = std::make_unique<USRPRadio>(uc);
         std::cout << "[MODE] USRP\n";
 #endif
     }
 
-    // ========= 发送 & 接收 =========
+    // =========================
+    // 发射与接收
+    // =========================
     radio->start_rx();
     radio->send_burst(tx_burst);
 
-    // “大窗口捕获”：按帧数倍数收
     const size_t rx_need = (size_t)rx_capture_frames * one_frame_sig.size();
     VecComplex rx_sig;
     radio->recv_samples(rx_need, rx_sig);
@@ -187,10 +197,11 @@ int main() {
     std::cout << "TX burst samples: " << tx_burst.size() << "\n";
     std::cout << "RX captured samples: " << rx_sig.size() << "\n";
 
-    // ========= 解调恢复 =========
+    // =========================
+    // 解调恢复
+    // =========================
     VecInt rx_bits = rx.receive(rx_sig);
 
-    // ========= 打印 & BER（先对齐前 min 长度）=========
     std::cout << "TX bits (first 64): " << bits_to_string(one_frame_bits, 64) << "\n";
     std::cout << "RX bits (first 64): " << bits_to_string(rx_bits, 64) << "\n";
     std::cout << "RX bits total: " << rx_bits.size() << "\n";
@@ -202,20 +213,26 @@ int main() {
     std::cout << "Bit errors: " << bit_errors << "\n";
     std::cout << "BER = " << std::setprecision(6) << ber << "\n";
 
-    // ========= 多帧BER统计 =========
+    // =========================
+    // 多帧平均 BER
+    // =========================
     size_t total_bit_errors = 0;
     size_t total_compared_bits = 0;
     double average_ber = 0.0;
 
     const int bits_per_frame = (int)one_frame_bits.size();
-    const int total_rx_frames = (bits_per_frame > 0) ? (int)(rx_bits.size() / (size_t)bits_per_frame) : 0;
+    const int total_rx_frames = (bits_per_frame > 0)
+        ? (int)(rx_bits.size() / (size_t)bits_per_frame)
+        : 0;
 
     if (total_rx_frames > 0 && bits_per_frame > 0) {
         for (int i = 0; i < total_rx_frames; ++i) {
             size_t frame_errors = 0;
             size_t frame_start = (size_t)i * (size_t)bits_per_frame;
+
             VecInt rx_frame(rx_bits.begin() + frame_start,
                 rx_bits.begin() + frame_start + (size_t)bits_per_frame);
+
             compute_ber(one_frame_bits, rx_frame, frame_errors);
             total_bit_errors += frame_errors;
             total_compared_bits += (size_t)bits_per_frame;

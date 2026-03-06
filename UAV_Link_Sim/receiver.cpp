@@ -208,6 +208,7 @@ int Receiver::getTelemetryPayloadSampleCount(int ccsk_chip_num) const
     case ModulationType::OOK:
     case ModulationType::FSK:
     case ModulationType::FM:
+    case ModulationType::MSK:
         return ccsk_chip_num * s;
 
     case ModulationType::QPSK:
@@ -250,8 +251,11 @@ VecInt Receiver::demodulateTelemetry(const VecComplex& rx)
     case ModulationType::FM:
         return demodulateFM(rx);
 
+    case ModulationType::MSK:
+        return demodulateMSK(rx);
+
     default:
-        std::cerr << "[Receiver] 当前接收机未实现该遥测调制方式\n";
+        std::cerr << "[Receiver] 当前接收机未实现该调制方式\n";
         return {};
     }
 }
@@ -284,9 +288,33 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     // 2) 单帧长度
     const int source_bits = config_.frame_bit * config_.n;
     const int ccsk_chip_num = (source_bits / 5) * 32;
-    const int payload_samp_num = getTelemetryPayloadSampleCount(ccsk_chip_num);
     const int zp_samp_num = config_.zp_sym * std::max(1, config_.samp);
+
+    int payload_samp_num = 0;
+    int total_pulses_dbg = 0;
+
+    if (config_.function == FunctionType::RemoteControl) {
+        const int pulse_len = (int)config_.ccskcode.size() * std::max(1, config_.samp); // 32*samp
+        const int gap_len = 33 * std::max(1, config_.samp);
+
+        // 真正的 pulse 数 = CCSK block 数 = ccsk_chip_num / 32 = source_bits / 5
+        const int total_pulses = ccsk_chip_num / 32;
+
+        total_pulses_dbg = total_pulses;
+        payload_samp_num = total_pulses * (pulse_len + gap_len);
+    }
+    else {
+        total_pulses_dbg = 0;
+        payload_samp_num = getTelemetryPayloadSampleCount(ccsk_chip_num);
+    }
+
     const int single_frame_total_samp = sync_len + payload_samp_num + zp_samp_num;
+
+    std::cout << "[DBG] ccsk_chip_num=" << ccsk_chip_num
+        << " total_pulses=" << total_pulses_dbg
+        << " payload_samp_num=" << payload_samp_num
+        << " single_frame_total_samp=" << single_frame_total_samp
+        << "\n";
 
     if (rx_signal.size() < (size_t)single_frame_total_samp) {
         std::cerr << "[Receiver] 信号长度不足一帧，无法解调\n";
@@ -376,6 +404,38 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         VecComplex payload(current_frame.begin() + sync_len, current_frame.end());
         if (zp_samp_num > 0 && (int)payload.size() > zp_samp_num) {
             payload.resize(payload.size() - (size_t)zp_samp_num);
+        }
+
+        if (config_.function == FunctionType::RemoteControl) {
+            const int pulse_len = (int)config_.ccskcode.size() * std::max(1, config_.samp); // 32*samp
+            const int gap_len = 33 * std::max(1, config_.samp);
+            const int total_pulses = ccsk_chip_num / 32;
+
+            // 1) 先解跳频
+            payload = dehopRemoteControlPayload(payload, total_pulses, pulse_len, gap_len);
+
+            // 2) 再去掉 gap
+            VecComplex depulsed;
+            depulsed.reserve((size_t)total_pulses * (size_t)pulse_len);
+
+            size_t pos = 0;
+            for (int p = 0; p < total_pulses; ++p) {
+                if (pos + (size_t)pulse_len > payload.size()) break;
+
+                depulsed.insert(depulsed.end(),
+                    payload.begin() + pos,
+                    payload.begin() + pos + (size_t)pulse_len);
+
+                pos += (size_t)pulse_len;
+
+                if (pos + (size_t)gap_len <= payload.size()) {
+                    pos += (size_t)gap_len;
+                }
+            }
+
+            payload.swap(depulsed);
+
+            std::cout << "[DBG] depulsed payload samples=" << payload.size() << "\n";
         }
 
         // 5) 解调链路
@@ -581,6 +641,114 @@ VecInt Receiver::demodulateFM(const VecComplex& rx)
     }
 
     return bits;
+}
+
+VecInt Receiver::demodulateMSK(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+    if (rx.size() < (size_t)s) return {};
+
+    // 4个相位状态：0, pi/2, pi, 3pi/2
+    const double phase_table[4] = { 0.0, PI / 2.0, PI, 3.0 * PI / 2.0 };
+
+    auto build_template = [&](int state_idx, int bit_val) -> VecComplex {
+        VecComplex tmpl;
+        tmpl.reserve((size_t)s);
+
+        double phase = phase_table[state_idx];
+        double T = 1.0;
+        double Ts = T / s;
+        double b = bit_val ? 1.0 : -1.0;
+
+        for (int j = 0; j < s; ++j) {
+            double t = j * Ts;
+            double I = b * std::cos(PI * t / (2.0 * T)) * std::cos(phase);
+            double Q = b * std::sin(PI * t / (2.0 * T)) * std::sin(phase);
+            tmpl.emplace_back(I, Q);
+        }
+        return tmpl;
+        };
+
+    // 预生成模板
+    VecComplex tmpl[4][2];
+    for (int st = 0; st < 4; ++st) {
+        tmpl[st][0] = build_template(st, 0);
+        tmpl[st][1] = build_template(st, 1);
+    }
+
+    // 发射端初始 phase = 0
+    int state = 0;
+
+    const size_t nsym = rx.size() / (size_t)s;
+    bits.reserve(nsym);
+
+    for (size_t k = 0; k < nsym; ++k) {
+        const size_t base = k * (size_t)s;
+
+        double best_err = 1e300;
+        int best_bit = 0;
+
+        for (int bit = 0; bit <= 1; ++bit) {
+            double err = 0.0;
+
+            for (int j = 0; j < s; ++j) {
+                Complex d = rx[base + (size_t)j] - tmpl[state][bit][(size_t)j];
+                err += std::norm(d);
+            }
+
+            if (err < best_err) {
+                best_err = err;
+                best_bit = bit;
+            }
+        }
+
+        bits.push_back(best_bit);
+
+        // 状态更新要和发射端一致
+        if (best_bit == 1)
+            state = (state + 1) & 3;   // +pi/2
+        else
+            state = (state + 3) & 3;   // -pi/2
+    }
+
+    return bits;
+}
+
+VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_gap,
+    int total_pulses,
+    int pulse_len,
+    int gap_len) const
+{
+    VecComplex out = payload_with_gap;
+    if (out.empty() || total_pulses <= 0 || pulse_len <= 0) return out;
+
+    // 发射端用的就是这个固定跳频序列生成方式
+    VecDouble frq_seq = generate_sequence(-13, 13, 3, total_pulses, 1);
+
+    const double fs = config_.fs;
+    if (!std::isfinite(fs) || fs <= 0.0) return out;
+
+    size_t pos = 0;
+    for (int p = 0; p < total_pulses; ++p) {
+        if (pos + (size_t)pulse_len > out.size()) break;
+
+        const double f = frq_seq[(size_t)p];
+
+        for (int j = 0; j < pulse_len; ++j) {
+            const double t = (double)j / fs;
+            const double ang = -2.0 * PI * f * t;   // 乘共轭，解跳频
+            out[pos + (size_t)j] *= Complex(std::cos(ang), std::sin(ang));
+        }
+
+        pos += (size_t)pulse_len;
+
+        if (pos + (size_t)gap_len <= out.size()) {
+            pos += (size_t)gap_len;
+        }
+    }
+
+    return out;
 }
 
 // ====================== CCSK 解扩 ======================

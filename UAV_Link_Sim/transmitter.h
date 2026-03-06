@@ -13,39 +13,33 @@ public:
     explicit Transmitter(const TransmitterConfig& config);
     ~Transmitter() = default;
 
-    // ==============================
-    // 主流程
-    // ==============================
     VecComplex generateTransmitSignal();
 
-    // 保存信号
     void saveSignal(const std::string& filename,
         const VecComplex& signal);
 
-    // ==============================
-    // 外部查询接口
-    // ==============================
     double getFS() const { return config_.fs; }
     const TransmitterConfig& getConfig() const { return config_; }
 
-    // 信源bit数量
     int getSourceBitCount() const {
         return config_.frame_bit * config_.n;
     }
+
     VecInt getLastSourceBits() const { return last_source_bits_; }
+
 private:
     TransmitterConfig config_;
 
-    // ==============================
-    // 内部流程
-    // ==============================
-    void calculateFS();                // 计算采样率
-    VecInt generateSourceData();       // 生成信源数据
+    void calculateFS();
+    VecInt generateSourceData();
 
+    // 遥控模式：把“已完成MSK+跳频”的信号重新组织成 pulse + gap
     VecComplex buildRemoteControlPulse(
-        const VecComplex& txSig_MSG,
-        int zeros_bit,
-        int pulse_len
+        const VecComplex& hoppedSig,
+        int pulse_len,
+        int gap_len,
+        int total_pulses
     );
+
     VecInt last_source_bits_;
 };

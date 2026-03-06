@@ -36,7 +36,11 @@ private:
     VecInt demodulateOOK(const VecComplex& rx);
     VecInt demodulateFSK(const VecComplex& rx);
     VecInt demodulateFM(const VecComplex& rx);
-
+    VecInt demodulateMSK(const VecComplex& rx);   // ÐÂÔö
+    VecComplex dehopRemoteControlPayload(const VecComplex& payload_with_gap,
+        int total_pulses,
+        int pulse_len,
+        int gap_len) const;
     // ===== ¸¨Öú =====
     VecInt despreadCCSK(const VecInt& chips);
 
