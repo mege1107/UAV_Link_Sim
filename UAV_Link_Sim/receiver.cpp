@@ -285,9 +285,22 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const int sync_len = (int)SYNC.size();
     const int fine_sync_len = (int)sync_fine.size();
 
-    // 2) 单帧长度
-    const int source_bits = config_.frame_bit * config_.n;
-    const int ccsk_chip_num = (source_bits / 5) * 32;
+    // 2) 单帧长度（必须按 RS 编码后的 payload 算）
+    const int source_bits = config_.frame_bit * config_.n;   // 原始信息位
+    const int rs_msg_bits = 15 * 5;                          // 75
+    const int rs_code_bits = 31 * 5;                         // 155
+
+    if (source_bits % rs_msg_bits != 0) {
+        std::cerr << "[Receiver] ERROR: source_bits is not a multiple of 75\n";
+        return {};
+    }
+
+    const int rs_blocks = source_bits / rs_msg_bits;
+    const int encoded_bits = rs_blocks * rs_code_bits;
+
+    // CCSK(32,5): 每 5 bit -> 32 chips
+    const int ccsk_chip_num = (encoded_bits / 5) * 32;
+
     const int zp_samp_num = config_.zp_sym * std::max(1, config_.samp);
 
     int payload_samp_num = 0;
@@ -297,14 +310,11 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         const int pulse_len = (int)config_.ccskcode.size() * std::max(1, config_.samp); // 32*samp
         const int gap_len = 33 * std::max(1, config_.samp);
 
-        // 真正的 pulse 数 = CCSK block 数 = ccsk_chip_num / 32 = source_bits / 5
         const int total_pulses = ccsk_chip_num / 32;
-
         total_pulses_dbg = total_pulses;
         payload_samp_num = total_pulses * (pulse_len + gap_len);
     }
     else {
-        total_pulses_dbg = 0;
         payload_samp_num = getTelemetryPayloadSampleCount(ccsk_chip_num);
     }
 
@@ -451,6 +461,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         VecInt ccsk_decoded = despreadCCSK(post_demod_bits);
+        std::cout << "[DBG][RX] ccsk_decoded bits = " << ccsk_decoded.size() << "\n";
         VecInt rs_decoded = HXL_RSDecode(ccsk_decoded, 31, 15);
 
         total_rx_bits.insert(total_rx_bits.end(), rs_decoded.begin(), rs_decoded.end());

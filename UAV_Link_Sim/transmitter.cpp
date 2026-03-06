@@ -69,9 +69,17 @@ VecComplex Transmitter::generateTransmitSignal() {
     last_source_bits_ = generateSourceData();
     VecInt dataIn = last_source_bits_;
 
-    // 2. RS编码 (31,15) —— 当前仍是占位实现
-    VecInt encoded_msg = HXL_RSCode(dataIn, 31, 15);
+    // 2. RS编码 (31,15)
+    VecInt encoded_msg;
+    const int rs_msg_bits = 15 * 5;   // 75
 
+    for (size_t off = 0; off + rs_msg_bits <= dataIn.size(); off += rs_msg_bits) {
+        VecInt blk(dataIn.begin() + off, dataIn.begin() + off + rs_msg_bits);
+        VecInt enc = HXL_RSCode(blk, 31, 15);   // 75 -> 155
+        encoded_msg.insert(encoded_msg.end(), enc.begin(), enc.end());
+    }
+    std::cout << "[DBG][TX] source bits = " << dataIn.size() << "\n";
+    std::cout << "[DBG][TX] RS encoded bits = " << encoded_msg.size() << "\n";
     // 3. CCSK (32,5) 扩频
     VecInt ccsk_msg = ZCY_CCSK32(encoded_msg, config_.ccskcode);
 
