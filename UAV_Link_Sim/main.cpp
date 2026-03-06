@@ -103,12 +103,17 @@ int main() {
     // ========= TX循环发送参数 =========
     const int tx_repeat_frames = 30;  // 发 30 帧（未来USRP时很关键）
     const int rx_capture_frames = 10; // 接收窗口按“帧数倍数”来抓（越大越稳，越大越慢）
-    const double awgn_snr_db = 80.0;
+    const double awgn_snr_db = 0.0;
 
     // ========= 配置 =========
     TransmitterConfig cfg;
     cfg.function = FunctionType::Telemetry;
-    cfg.modulation = ModulationType::BPSK;
+    //cfg.modulation = ModulationType::BPSK; //FM不兼容，不要用
+    cfg.modulation = ModulationType::QPSK;
+    //cfg.modulation = ModulationType::QAM;
+    //cfg.modulation = ModulationType::OOK;
+    //cfg.modulation = ModulationType::FSK;
+   // cfg.modulation = ModulationType::FM;
     cfg.n = 10;
     cfg.frame_bit = 75;
     cfg.samp = 8;

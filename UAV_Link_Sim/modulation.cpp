@@ -1,27 +1,83 @@
 #include "modulation.h"
-#include "utils.h" 
+#include "utils.h"
 #include "coding.h"
+
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
+
+namespace {
+
+// 设计 sqrt raised cosine (对应 MATLAB rcosdesign(beta, span, sps, 'sqrt'))
+VecDouble designSRRC(double beta, int span, int sps)
+{
+    if (sps <= 0 || span <= 0) return {};
+
+    const int N = span * sps + 1;
+    const int mid = N / 2;
+    VecDouble h(N, 0.0);
+
+    for (int i = 0; i < N; ++i) {
+        const double t = (double)(i - mid) / (double)sps;
+
+        if (std::abs(t) < 1e-12) {
+            h[i] = 1.0 + beta * (4.0 / PI - 1.0);
+        }
+        else if (beta > 0.0 && std::abs(std::abs(t) - 1.0 / (4.0 * beta)) < 1e-12) {
+            const double a = (1.0 + 2.0 / PI) * std::sin(PI / (4.0 * beta));
+            const double b = (1.0 - 2.0 / PI) * std::cos(PI / (4.0 * beta));
+            h[i] = (beta / std::sqrt(2.0)) * (a + b);
+        }
+        else {
+            const double num =
+                std::sin(PI * t * (1.0 - beta)) +
+                4.0 * beta * t * std::cos(PI * t * (1.0 + beta));
+            const double den =
+                PI * t * (1.0 - std::pow(4.0 * beta * t, 2.0));
+
+            h[i] = (std::abs(den) < 1e-12) ? 0.0 : (num / den);
+        }
+    }
+
+    return h;
+}
+
+// MATLAB filter(b,1,x) 风格：输出长度 == 输入长度
+VecDouble firFilterSameLength(const VecDouble& b, const VecDouble& x)
+{
+    if (b.empty() || x.empty()) return {};
+
+    VecDouble y(x.size(), 0.0);
+
+    for (size_t n = 0; n < x.size(); ++n) {
+        double acc = 0.0;
+        const size_t kmax = std::min(n, b.size() - 1);
+        for (size_t k = 0; k <= kmax; ++k) {
+            acc += b[k] * x[n - k];
+        }
+        y[n] = acc;
+    }
+
+    return y;
+}
+
+} // namespace
 
 // MSK调制 (简化版，对应MATLAB mskmod)
 VecComplex mskmod(const VecInt& bits, int samp) {
     VecComplex tx;
     double phase = 0;
-    double T = 1.0; // 符号周期
+    double T = 1.0;
     double Ts = T / samp;
 
     for (size_t i = 0; i < bits.size(); ++i) {
         double b = bits[i] ? 1.0 : -1.0;
         for (int j = 0; j < samp; ++j) {
             double t = j * Ts;
-            // MSK 正交调制公式
             double I = b * std::cos(PI * t / (2 * T)) * std::cos(phase);
             double Q = b * std::sin(PI * t / (2 * T)) * std::sin(phase);
             tx.emplace_back(I, Q);
         }
-        // 更新相位 (MSK相位连续性)
         phase += bits[i] ? PI / 2 : -PI / 2;
     }
     return tx;
@@ -38,13 +94,12 @@ VecComplex bpskmod(const VecInt& bits, int samp) {
 
 // QPSK调制 (Gray编码, pi/4偏移)
 VecComplex qpskmod(const VecInt& bits, int samp, double& fs) {
-    fs /= 2.0; // 对应MATLAB代码中 fs = fs/2
+    fs /= 2.0;
     VecComplex symbols;
 
     for (size_t i = 0; i < bits.size(); i += 2) {
         int b0 = bits[i];
         int b1 = (i + 1 < bits.size()) ? bits[i + 1] : 0;
-        // Gray映射到 pi/4, 3pi/4, 5pi/4, 7pi/4
         double theta = (2 * (b0 ^ b1) + 1) * PI / 4 + (b1 ? PI : 0);
         symbols.emplace_back(std::cos(theta), std::sin(theta));
     }
@@ -52,12 +107,11 @@ VecComplex qpskmod(const VecInt& bits, int samp, double& fs) {
     return upsampleComplex(symbols, samp);
 }
 
-// 16QAM调制 (归一化功率)
+// 16QAM调制
 VecComplex qammod(const VecInt& bits, int samp, double& fs) {
-    fs /= 4.0; // 对应MATLAB代码中 fs = fs/4
+    fs /= 4.0;
     VecComplex symbols;
 
-    // 16QAM星座图映射 (Gray编码)
     const double map[4] = { -3.0, -1.0, 1.0, 3.0 };
 
     for (size_t i = 0; i < bits.size(); i += 4) {
@@ -72,8 +126,7 @@ VecComplex qammod(const VecInt& bits, int samp, double& fs) {
         symbols.emplace_back(map[I_idx], map[Q_idx]);
     }
 
-    // 归一化 (平均功率为1)
-    double norm = std::sqrt(10.0);
+    const double norm = std::sqrt(10.0);
     for (auto& s : symbols) s /= norm;
 
     return upsampleComplex(symbols, samp);
@@ -88,61 +141,63 @@ VecComplex ookmod(const VecInt& bits, int samp) {
 
 // FSK调制
 VecComplex fskmod(const VecInt& bits, int M, double deta_f, int samp, double fs) {
+    (void)M;
     VecComplex tx;
-    double T = 1.0;
-    double Ts = 1.0 / fs;
+    const double Ts = 1.0 / fs;
 
     for (int b : bits) {
-        double f = b ? deta_f : -deta_f;
+        const double f = b ? deta_f : -deta_f;
         for (int j = 0; j < samp; ++j) {
-            double t = j * Ts;
+            const double t = j * Ts;
             tx.emplace_back(std::cos(2 * PI * f * t), std::sin(2 * PI * f * t));
         }
     }
     return tx;
 }
 
-// FM调制 (含升余弦滤波)
+// FM调制（严格对齐 MATLAB 逻辑）
 VecComplex fmmod(const VecInt& bits, int samp, double fs, double kf) {
-    // 1. 差分编码与双极性
+    if (samp <= 0 || fs <= 0.0) return {};
+
+    // 1) 差分编码
     VecInt diff = d_encode(bits);
-    VecDouble m(diff.size());
-    for (size_t i = 0; i < diff.size(); ++i) m[i] = 2 * diff[i] - 1.0;
 
-    // 2. 上采样
-    VecDouble m_up(m.size() * samp, 0.0);
-    for (size_t i = 0; i < m.size(); ++i) m_up[i * samp] = m[i];
-
-    // 3. 升余弦滤波器 (简化版，sqrt)
-    double rolloff = 0.5;
-    int span = 6;
-    int filter_len = span * samp + 1;
-    VecDouble rcos(filter_len);
-    int mid = filter_len / 2;
-
-    for (int i = 0; i < filter_len; ++i) {
-        double t = (i - mid) / (double)samp;
-        double num = std::sin(PI * t) * std::cos(PI * rolloff * t);
-        double den = PI * t * (1 - (2 * rolloff * t) * (2 * rolloff * t));
-        rcos[i] = (t == 0) ? 1.0 : num / den;
+    // 2) 双极性映射
+    VecDouble bipolar(diff.size(), 0.0);
+    for (size_t i = 0; i < diff.size(); ++i) {
+        bipolar[i] = diff[i] ? 1.0 : -1.0;
     }
 
-    // 4. 滤波 (卷积)
-    VecDouble m_filtered(m_up.size() + filter_len - 1, 0.0);
-    for (size_t i = 0; i < m_up.size(); ++i) {
-        for (int j = 0; j < filter_len; ++j) {
-            m_filtered[i + j] += m_up[i] * rcos[j];
-        }
-    }
-    // 裁剪延迟
-    m_filtered = VecDouble(m_filtered.begin() + mid, m_filtered.end() - mid);
+    // 3) SRRC 滤波器
+    const double rolloff = 0.5;
+    const int span = 6;
+    VecDouble rcos_fir = designSRRC(rolloff, span, samp);
+    const int filter_delay = (int)(rcos_fir.size() - 1) / 2;
 
-    // 5. 积分与调相
+    // 4) 上采样
+    VecDouble up((size_t)bipolar.size() * (size_t)samp, 0.0);
+    for (size_t i = 0; i < bipolar.size(); ++i) {
+        up[i * (size_t)samp] = bipolar[i];
+    }
+
+    // 5) 尾部补零（和 MATLAB 一致）
+    up.insert(up.end(), (size_t)filter_delay, 0.0);
+
+    // 6) 成形滤波，输出长度与输入长度相同
+    VecDouble m = firFilterSameLength(rcos_fir, up);
+
+    // 7) 去掉前 filter_delay
+    if ((int)m.size() <= filter_delay) return {};
+    m.erase(m.begin(), m.begin() + filter_delay);
+
+    // 现在长度应回到 bits.size() * samp
     VecComplex tx;
+    tx.reserve(m.size());
+
+    // 8) FM 调制
     double phi = 0.0;
-    double Ts = 1.0 / fs;
-    for (double sample : m_filtered) {
-        phi += 2 * PI * kf * sample * Ts;
+    for (double v : m) {
+        phi += 2.0 * PI * kf * v / fs;
         tx.emplace_back(std::cos(phi), std::sin(phi));
     }
 

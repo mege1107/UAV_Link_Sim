@@ -56,7 +56,6 @@ static bool findSyncStartNormalizedWindow(
     best_metric = -1.0;
     best_rel_idx = 0;
 
-    // 只在窗口内扫描：abs = win_start + i
     const size_t K = (win_end - win_start) - M;
     for (size_t i = 0; i <= K; ++i) {
         const size_t abs_idx = win_start + i;
@@ -76,7 +75,7 @@ static bool findSyncStartNormalizedWindow(
         double metric = std::norm(dot) / (Es * Er);
         if (metric > best_metric) {
             best_metric = metric;
-            best_rel_idx = (int)i; // 相对 win_start
+            best_rel_idx = (int)i;
         }
     }
     return best_metric > 0.0;
@@ -183,6 +182,80 @@ void Receiver::resetFreqHistory() {
     frame_count_ = 0;
 }
 
+// ====================== 辅助：每符号挑最大能量采样点 ======================
+Complex Receiver::pickBestSampleInSymbol(const VecComplex& rx, size_t base, int s) const
+{
+    int best_j = 0;
+    double best_e = -1.0;
+
+    for (int j = 0; j < s; ++j) {
+        double e = std::norm(rx[base + (size_t)j]);
+        if (e > best_e) {
+            best_e = e;
+            best_j = j;
+        }
+    }
+    return rx[base + (size_t)best_j];
+}
+
+// ====================== payload长度：按调制方式计算 ======================
+int Receiver::getTelemetryPayloadSampleCount(int ccsk_chip_num) const
+{
+    const int s = std::max(1, config_.samp);
+
+    switch (config_.modulation) {
+    case ModulationType::BPSK:
+    case ModulationType::OOK:
+    case ModulationType::FSK:
+    case ModulationType::FM:
+        return ccsk_chip_num * s;
+
+    case ModulationType::QPSK:
+        return ((ccsk_chip_num + 1) / 2) * s;
+
+    case ModulationType::QAM:
+        return ((ccsk_chip_num + 3) / 4) * s;
+
+    default:
+        return ccsk_chip_num * s;
+    }
+}
+
+// ====================== 哪些调制需要差分解码 ======================
+bool Receiver::modulationNeedsDiffDecode() const
+{
+    return (config_.modulation == ModulationType::BPSK ||
+        config_.modulation == ModulationType::FM);
+}
+
+// ====================== 统一解调入口 ======================
+VecInt Receiver::demodulateTelemetry(const VecComplex& rx)
+{
+    switch (config_.modulation) {
+    case ModulationType::BPSK:
+        return demodulateBPSK(rx);
+
+    case ModulationType::QPSK:
+        return demodulateQPSK(rx);
+
+    case ModulationType::QAM:
+        return demodulateQAM16(rx);
+
+    case ModulationType::OOK:
+        return demodulateOOK(rx);
+
+    case ModulationType::FSK:
+        return demodulateFSK(rx);
+
+    case ModulationType::FM:
+        return demodulateFM(rx);
+
+    default:
+        std::cerr << "[Receiver] 当前接收机未实现该遥测调制方式\n";
+        return {};
+    }
+}
+
 // ====================== 主接收函数（锁帧+窄窗同步） ======================
 VecInt Receiver::receive(const VecComplex& rx_signal)
 {
@@ -211,8 +284,8 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     // 2) 单帧长度
     const int source_bits = config_.frame_bit * config_.n;
     const int ccsk_chip_num = (source_bits / 5) * 32;
-    const int payload_samp_num = ccsk_chip_num * config_.samp;
-    const int zp_samp_num = config_.zp_sym * config_.samp;
+    const int payload_samp_num = getTelemetryPayloadSampleCount(ccsk_chip_num);
+    const int zp_samp_num = config_.zp_sym * std::max(1, config_.samp);
     const int single_frame_total_samp = sync_len + payload_samp_num + zp_samp_num;
 
     if (rx_signal.size() < (size_t)single_frame_total_samp) {
@@ -224,19 +297,15 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     size_t current_offset = 0;
     const size_t total_rx_len = rx_signal.size();
     const double sync_threshold = 0.08;
-
-    // 窄窗宽度：默认 ±2*samp（足够覆盖采样相位/轻微抖动）
     const size_t W = (size_t)(2 * std::max(1, config_.samp));
 
     while (current_offset + (size_t)single_frame_total_samp <= total_rx_len) {
 
-        // ====== 先“锁帧”：优先检查期望点 current_offset ======
         size_t sync_abs_start = current_offset;
         double sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
 
         bool ok = (sync_metric >= sync_threshold);
 
-        // ====== 若期望点不够强，再窄窗搜索兜底 ======
         if (!ok) {
             size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
             size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
@@ -260,7 +329,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
         if (frame_abs_end > total_rx_len) break;
 
-        // drift 打印：观察是否还会跳帧
         std::cout << "[DBG] current_offset=" << current_offset
             << " sync_abs_start=" << sync_abs_start
             << " drift=" << (long long)sync_abs_start - (long long)current_offset
@@ -269,21 +337,21 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         VecComplex current_frame(rx_signal.begin() + sync_abs_start, rx_signal.begin() + frame_abs_end);
 
-        // ====== CFO + 相位校正（如果你有 enable_cfo 开关就放条件里）======
+        // ====== CFO + 相位校正 ======
         VecComplex rx_fine_sync(current_frame.begin() + (sync_len - fine_sync_len),
             current_frame.begin() + sync_len);
 
         double frame_freq_offset = estimateCFOFromPreamble(rx_fine_sync, sync_fine, fs);
         frame_count_++;
 
-        frame_index_history_.push_back(frame_count_);
         freq_offset_history_.push_back(frame_freq_offset);
+        frame_index_history_.push_back(frame_count_);
 
         linearFitLSQ(frame_index_history_, freq_offset_history_, fit_a_, fit_b_);
         double f_hat = fit_a_ * frame_count_ + fit_b_;
         if (!std::isfinite(f_hat)) f_hat = 0.0;
 
-        if (f_hat != 0.0) {
+        if (config_.enable_cfo && f_hat != 0.0) {
             for (size_t n = 0; n < current_frame.size(); ++n) {
                 double t = (double)n / fs;
                 double ang = 2 * PI * f_hat * t;
@@ -294,9 +362,11 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         VecComplex rx_fine_sync_corrected(current_frame.begin() + (sync_len - fine_sync_len),
             current_frame.begin() + sync_len);
+
         double residual_phase = estimateResidualPhase(rx_fine_sync_corrected, sync_fine);
         if (!std::isfinite(residual_phase)) residual_phase = 0.0;
 
+        // FM 对整体常相位不敏感，但旋一下也无妨
         if (residual_phase != 0.0) {
             Complex rot = std::conj(cexpj(residual_phase));
             for (auto& samp : current_frame) samp *= rot;
@@ -309,9 +379,18 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         // 5) 解调链路
-        VecInt bpsk_bits = demodulateBPSK(payload);
-        VecInt diff_decoded = d_decode(bpsk_bits);
-        VecInt ccsk_decoded = despreadCCSK(diff_decoded);
+        VecInt demod_bits = demodulateTelemetry(payload);
+        if (demod_bits.empty()) {
+            std::cout << "[Receiver] 解调结果为空，结束\n";
+            break;
+        }
+
+        VecInt post_demod_bits = demod_bits;
+        if (modulationNeedsDiffDecode()) {
+            post_demod_bits = d_decode(demod_bits);
+        }
+
+        VecInt ccsk_decoded = despreadCCSK(post_demod_bits);
         VecInt rs_decoded = HXL_RSDecode(ccsk_decoded, 31, 15);
 
         total_rx_bits.insert(total_rx_bits.end(), rs_decoded.begin(), rs_decoded.end());
@@ -322,29 +401,185 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             << "，解调比特数：" << rs_decoded.size()
             << std::endl;
 
-        // 关键：下一帧期望起点 = 本帧末尾（锁帧）
         current_offset = frame_abs_end;
     }
 
     return total_rx_bits;
 }
 
-// ====================== BPSK：符号窗内最大能量点判决 ======================
+// ====================== BPSK ======================
 VecInt Receiver::demodulateBPSK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
     for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        int best_j = 0;
-        double best_e = -1.0;
-        for (int j = 0; j < s; ++j) {
-            double e = std::norm(rx[base + (size_t)j]);
-            if (e > best_e) { best_e = e; best_j = j; }
-        }
-        double val = rx[base + (size_t)best_j].real();
-        bits.push_back(val > 0 ? 1 : 0);
+        Complex sym = pickBestSampleInSymbol(rx, base, s);
+        bits.push_back(sym.real() > 0.0 ? 1 : 0);
     }
+
+    return bits;
+}
+
+// ====================== QPSK ======================
+// 对应发射端 qpskmod 的映射：
+// 00 -> (+,+)
+// 01 -> (+,-)
+// 10 -> (-,+)
+// 11 -> (-,-)
+VecInt Receiver::demodulateQPSK(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+
+    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+        Complex sym = pickBestSampleInSymbol(rx, base, s);
+
+        int b0 = (sym.real() < 0.0) ? 1 : 0;
+        int b1 = (sym.imag() < 0.0) ? 1 : 0;
+
+        bits.push_back(b0);
+        bits.push_back(b1);
+    }
+
+    return bits;
+}
+
+// ====================== 16QAM ======================
+// 发射端映射：
+// 00 -> -3
+// 01 -> +3
+// 10 -> +1
+// 11 -> -1
+static inline int nearest_qam_level(double x)
+{
+    const int levels[4] = { -3, -1, 1, 3 };
+    int best = levels[0];
+    double best_d = std::abs(x - (double)levels[0]);
+
+    for (int i = 1; i < 4; ++i) {
+        double d = std::abs(x - (double)levels[i]);
+        if (d < best_d) {
+            best_d = d;
+            best = levels[i];
+        }
+    }
+    return best;
+}
+
+static inline void qam_level_to_bits(int level, int& b0, int& b1)
+{
+    switch (level) {
+    case -3: b0 = 0; b1 = 0; break;
+    case  3: b0 = 0; b1 = 1; break;
+    case  1: b0 = 1; b1 = 0; break;
+    case -1: b0 = 1; b1 = 1; break;
+    default: b0 = 0; b1 = 0; break;
+    }
+}
+
+VecInt Receiver::demodulateQAM16(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+    const double norm = std::sqrt(10.0);
+
+    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+        Complex sym = pickBestSampleInSymbol(rx, base, s);
+
+        double I = sym.real() * norm;
+        double Q = sym.imag() * norm;
+
+        int I_level = nearest_qam_level(I);
+        int Q_level = nearest_qam_level(Q);
+
+        int b0, b1, b2, b3;
+        qam_level_to_bits(I_level, b0, b1);
+        qam_level_to_bits(Q_level, b2, b3);
+
+        bits.push_back(b0);
+        bits.push_back(b1);
+        bits.push_back(b2);
+        bits.push_back(b3);
+    }
+
+    return bits;
+}
+
+// ====================== OOK ======================
+VecInt Receiver::demodulateOOK(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+
+    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+        double best_amp = 0.0;
+        for (int j = 0; j < s; ++j) {
+            best_amp = std::max(best_amp, std::abs(rx[base + (size_t)j]));
+        }
+        bits.push_back(best_amp > 0.5 ? 1 : 0);
+    }
+
+    return bits;
+}
+
+// ====================== 2FSK ======================
+VecInt Receiver::demodulateFSK(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+
+    // 与 transmitter.cpp 中保持一致
+    const double deta_f = 1e6;
+    const double fs = config_.fs;
+
+    if (!std::isfinite(fs) || fs <= 0.0) return {};
+
+    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+        Complex corr_pos(0.0, 0.0);
+        Complex corr_neg(0.0, 0.0);
+
+        for (int j = 0; j < s; ++j) {
+            double t = (double)j / fs;
+            Complex c_pos(std::cos(2 * PI * deta_f * t), std::sin(2 * PI * deta_f * t));
+            Complex c_neg(std::cos(-2 * PI * deta_f * t), std::sin(-2 * PI * deta_f * t));
+
+            corr_pos += rx[base + (size_t)j] * std::conj(c_pos);
+            corr_neg += rx[base + (size_t)j] * std::conj(c_neg);
+        }
+
+        bits.push_back(std::norm(corr_pos) >= std::norm(corr_neg) ? 1 : 0);
+    }
+
+    return bits;
+}
+
+// ====================== FM ======================
+// 发射端 fmmod 内部先 d_encode，再做双极性、升余弦、积分调相。
+// 这里用相邻采样差分相位做频率判决，再按每 symbol 求和取符号。
+VecInt Receiver::demodulateFM(const VecComplex& rx)
+{
+    VecInt bits;
+    const int s = std::max(1, config_.samp);
+
+    if (rx.size() < 2) return {};
+
+    VecDouble disc(rx.size(), 0.0);
+    disc[0] = 0.0;
+
+    for (size_t n = 1; n < rx.size(); ++n) {
+        Complex z = std::conj(rx[n - 1]) * rx[n];
+        disc[n] = std::atan2(z.imag(), z.real());
+    }
+
+    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+        double acc = 0.0;
+        for (int j = 0; j < s; ++j) {
+            acc += disc[base + (size_t)j];
+        }
+        bits.push_back(acc > 0.0 ? 1 : 0);
+    }
+
     return bits;
 }
 
@@ -365,6 +600,7 @@ VecInt Receiver::despreadCCSK(const VecInt& chips)
                 int tx_chip = ccsk_code[(j - k + 32) % 32];
                 if (chips[i + (size_t)j] == tx_chip) corr++;
             }
+
             if (corr > max_corr) {
                 max_corr = corr;
                 best_k = k;
@@ -375,5 +611,6 @@ VecInt Receiver::despreadCCSK(const VecInt& chips)
             decoded.push_back((best_k >> b) & 1);
         }
     }
+
     return decoded;
 }
