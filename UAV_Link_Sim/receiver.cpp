@@ -285,7 +285,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const int sync_len = (int)SYNC.size();
     const int fine_sync_len = (int)sync_fine.size();
 
-    // 2) 单帧长度（必须按 RS 编码后的 payload 算）
+    // 2) 单帧长度（按 RS 编码后的 payload 算）
     const int source_bits = config_.frame_bit * config_.n;   // 原始信息位
     const int rs_msg_bits = 15 * 5;                          // 75
     const int rs_code_bits = 31 * 5;                         // 155
@@ -301,15 +301,15 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     // CCSK(32,5): 每 5 bit -> 32 chips
     const int ccsk_chip_num = (encoded_bits / 5) * 32;
 
-    const int zp_samp_num = config_.zp_sym * std::max(1, config_.samp);
+    const int s = std::max(1, config_.samp);
+    const int zp_samp_num = config_.zp_sym * s;
 
     int payload_samp_num = 0;
     int total_pulses_dbg = 0;
 
     if (config_.function == FunctionType::RemoteControl) {
-        const int pulse_len = (int)config_.ccskcode.size() * std::max(1, config_.samp); // 32*samp
-        const int gap_len = 33 * std::max(1, config_.samp);
-
+        const int pulse_len = (int)config_.ccskcode.size() * s; // 32*samp
+        const int gap_len = 33 * s;
         const int total_pulses = ccsk_chip_num / 32;
         total_pulses_dbg = total_pulses;
         payload_samp_num = total_pulses * (pulse_len + gap_len);
@@ -334,38 +334,74 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     VecInt total_rx_bits;
     size_t current_offset = 0;
     const size_t total_rx_len = rx_signal.size();
-    const double sync_threshold = 0.08;
-    const size_t W = (size_t)(2 * std::max(1, config_.samp));
+
+    // 调试阶段先放低
+    const double sync_threshold = 0.02;
+    const size_t W = (size_t)(2 * s);
+
+    bool acquired = false;
 
     while (current_offset + (size_t)single_frame_total_samp <= total_rx_len) {
 
         size_t sync_abs_start = current_offset;
-        double sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
+        double sync_metric = -1.0;
+        bool ok = false;
 
-        bool ok = (sync_metric >= sync_threshold);
-
-        if (!ok) {
-            size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
-            size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
+        if (!acquired) {
+            // ================= 首帧：全局搜索 =================
+            size_t win_start = 0;
+            size_t win_end = total_rx_len;
 
             int best_rel = 0;
             double best_m = 0.0;
             if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                std::cout << "[Receiver] 未检测到有效同步头，解调结束\n";
+                std::cout << "[Receiver] 首帧全局搜索失败，解调结束\n";
                 break;
             }
+
             sync_abs_start = win_start + (size_t)best_rel;
             sync_metric = best_m;
             ok = (sync_metric >= sync_threshold);
-        }
 
-        if (!ok) {
-            std::cout << "[Receiver] 同步峰值过低(" << sync_metric << ")，解调结束\n";
-            break;
+            if (!ok) {
+                std::cout << "[Receiver] 首帧同步峰值过低(" << sync_metric << ")，解调结束\n";
+                break;
+            }
+
+            acquired = true;
+        }
+        else {
+            // ================= 后续帧：局部跟踪 =================
+            sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
+            ok = (sync_metric >= sync_threshold);
+
+            if (!ok) {
+                size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
+                size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
+
+                int best_rel = 0;
+                double best_m = 0.0;
+                if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
+                    std::cout << "[Receiver] 未检测到有效同步头，解调结束\n";
+                    break;
+                }
+
+                sync_abs_start = win_start + (size_t)best_rel;
+                sync_metric = best_m;
+                ok = (sync_metric >= sync_threshold);
+            }
+
+            if (!ok) {
+                std::cout << "[Receiver] 同步峰值过低(" << sync_metric << ")，解调结束\n";
+                break;
+            }
         }
 
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
-        if (frame_abs_end > total_rx_len) break;
+        if (frame_abs_end > total_rx_len) {
+            std::cout << "[Receiver] 剩余采样不足完整一帧，解调结束\n";
+            break;
+        }
 
         std::cout << "[DBG] current_offset=" << current_offset
             << " sync_abs_start=" << sync_abs_start
@@ -373,7 +409,8 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             << " metric=" << sync_metric
             << "\n";
 
-        VecComplex current_frame(rx_signal.begin() + sync_abs_start, rx_signal.begin() + frame_abs_end);
+        VecComplex current_frame(rx_signal.begin() + sync_abs_start,
+            rx_signal.begin() + frame_abs_end);
 
         // ====== CFO + 相位校正 ======
         VecComplex rx_fine_sync(current_frame.begin() + (sync_len - fine_sync_len),
@@ -392,9 +429,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         if (config_.enable_cfo && f_hat != 0.0) {
             for (size_t n = 0; n < current_frame.size(); ++n) {
                 double t = (double)n / fs;
-                double ang = 2 * PI * f_hat * t;
+                double ang = 2.0 * PI * f_hat * t;
                 if (!std::isfinite(ang)) continue;
-                current_frame[n] *= std::conj(cexpj(ang));
+                current_frame[n] *= std::conj(Complex(std::cos(ang), std::sin(ang)));
             }
         }
 
@@ -404,74 +441,91 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         double residual_phase = estimateResidualPhase(rx_fine_sync_corrected, sync_fine);
         if (!std::isfinite(residual_phase)) residual_phase = 0.0;
 
-        // FM 对整体常相位不敏感，但旋一下也无妨
         if (residual_phase != 0.0) {
-            Complex rot = std::conj(cexpj(residual_phase));
-            for (auto& samp : current_frame) samp *= rot;
+            Complex ph_rot = std::conj(Complex(std::cos(residual_phase), std::sin(residual_phase)));
+            for (auto& v : current_frame) v *= ph_rot;
         }
 
-        // 4) payload 截取并裁 ZP
-        VecComplex payload(current_frame.begin() + sync_len, current_frame.end());
-        if (zp_samp_num > 0 && (int)payload.size() > zp_samp_num) {
-            payload.resize(payload.size() - (size_t)zp_samp_num);
-        }
-
-        if (config_.function == FunctionType::RemoteControl) {
-            const int pulse_len = (int)config_.ccskcode.size() * std::max(1, config_.samp); // 32*samp
-            const int gap_len = 33 * std::max(1, config_.samp);
-            const int total_pulses = ccsk_chip_num / 32;
-
-            // 1) 先解跳频
-            payload = dehopRemoteControlPayload(payload, total_pulses, pulse_len, gap_len);
-
-            // 2) 再去掉 gap
-            VecComplex depulsed;
-            depulsed.reserve((size_t)total_pulses * (size_t)pulse_len);
-
-            size_t pos = 0;
-            for (int p = 0; p < total_pulses; ++p) {
-                if (pos + (size_t)pulse_len > payload.size()) break;
-
-                depulsed.insert(depulsed.end(),
-                    payload.begin() + pos,
-                    payload.begin() + pos + (size_t)pulse_len);
-
-                pos += (size_t)pulse_len;
-
-                if (pos + (size_t)gap_len <= payload.size()) {
-                    pos += (size_t)gap_len;
-                }
-            }
-
-            payload.swap(depulsed);
-
-            std::cout << "[DBG] depulsed payload samples=" << payload.size() << "\n";
-        }
-
-        // 5) 解调链路
-        VecInt demod_bits = demodulateTelemetry(payload);
-        if (demod_bits.empty()) {
-            std::cout << "[Receiver] 解调结果为空，结束\n";
+        // ====== 提取 payload（去掉 sync 和尾部 ZP） ======
+        const size_t payload_start = (size_t)sync_len;
+        const size_t payload_end = payload_start + (size_t)payload_samp_num;
+        if (payload_end > current_frame.size()) {
+            std::cout << "[Receiver] payload 越界，解调结束\n";
             break;
         }
 
-        VecInt post_demod_bits = demod_bits;
-        if (modulationNeedsDiffDecode()) {
-            post_demod_bits = d_decode(demod_bits);
+        VecComplex payload_with_gap(current_frame.begin() + payload_start,
+            current_frame.begin() + payload_end);
+
+        VecComplex payload_sig = payload_with_gap;
+
+        if (config_.function == FunctionType::RemoteControl) {
+            const int pulse_len = (int)config_.ccskcode.size() * s;
+            const int gap_len = 33 * s;
+            const int total_pulses = ccsk_chip_num / 32;
+            payload_sig = dehopRemoteControlPayload(payload_with_gap, total_pulses, pulse_len, gap_len);
         }
 
-        VecInt ccsk_decoded = despreadCCSK(post_demod_bits);
-        std::cout << "[DBG][RX] ccsk_decoded bits = " << ccsk_decoded.size() << "\n";
-        VecInt rs_decoded = HXL_RSDecode(ccsk_decoded, 31, 15);
+        // ====== 解调 ======
+        VecInt rx_chips_or_syms = demodulateTelemetry(payload_sig);
+        if (rx_chips_or_syms.empty()) {
+            std::cout << "[Receiver] 解调输出为空，解调结束\n";
+            break;
+        }
 
-        total_rx_bits.insert(total_rx_bits.end(), rs_decoded.begin(), rs_decoded.end());
+        // BPSK / FM 等需要差分解码
+        if (modulationNeedsDiffDecode()) {
+            rx_chips_or_syms = d_decode(rx_chips_or_syms);
+        }
+
+        // 长度保护：只取本帧应有的 chip 数
+        if ((int)rx_chips_or_syms.size() > ccsk_chip_num) {
+            rx_chips_or_syms.resize((size_t)ccsk_chip_num);
+        }
+
+        if ((int)rx_chips_or_syms.size() < ccsk_chip_num) {
+            std::cout << "[Receiver] 解调后 chip 数不足，得到 "
+                << rx_chips_or_syms.size()
+                << "，期望 " << ccsk_chip_num << "\n";
+            break;
+        }
+
+        // ====== 解扩 ======
+        VecInt rx_encoded_bits = despreadCCSK(rx_chips_or_syms);
+        if (rx_encoded_bits.empty()) {
+            std::cout << "[Receiver] 解扩失败，解调结束\n";
+            break;
+        }
+
+        if ((int)rx_encoded_bits.size() > encoded_bits) {
+            rx_encoded_bits.resize((size_t)encoded_bits);
+        }
+
+        if ((int)rx_encoded_bits.size() < encoded_bits) {
+            std::cout << "[Receiver] 解扩后编码比特数不足，得到 "
+                << rx_encoded_bits.size()
+                << "，期望 " << encoded_bits << "\n";
+            break;
+        }
+
+        std::cout << "[DBG][RX] ccsk_decoded bits = " << rx_encoded_bits.size() << "\n";
+
+        // ====== RS 解码 ======
+        VecInt rx_source_bits = HXL_RSDecode(rx_encoded_bits, 31, 15);
+        if (rx_source_bits.empty()) {
+            std::cout << "[Receiver] RS 解码失败，解调结束\n";
+            break;
+        }
+
+        total_rx_bits.insert(total_rx_bits.end(), rx_source_bits.begin(), rx_source_bits.end());
 
         std::cout << "[Receiver] 第" << frame_count_
             << "帧解调完成，同步峰值：" << sync_metric
             << "，频偏估计：" << f_hat << "Hz"
-            << "，解调比特数：" << rs_decoded.size()
-            << std::endl;
+            << "，解调比特数：" << rx_source_bits.size()
+            << "\n";
 
+        // 下一帧按“当前检测到的这一帧末尾”继续
         current_offset = frame_abs_end;
     }
 
