@@ -2,7 +2,6 @@
 #include <iomanip>
 #include <string>
 #include <vector>
-#include <memory>
 #include <algorithm>
 #include <exception>
 #include <thread>
@@ -35,76 +34,42 @@ static double compute_ber(const VecInt& tx, const VecInt& rx, size_t& bit_errors
     return (n == 0) ? 0.0 : (double)bit_errors / (double)n;
 }
 
-class IRadio {
-public:
-    virtual ~IRadio() = default;
-
-    virtual void start_rx_worker(size_t target_samps) = 0;
-    virtual void stop_rx_worker() = 0;
-    virtual void wait_rx_worker() = 0;
-    virtual VecComplex fetch_rx_buffer() = 0;
-
-    virtual size_t send_burst(const VecComplex& samples) = 0;
+enum class RunMode {
+    LOOPBACK,
+    AWGN,
+    USRP
 };
-
-#ifdef WITH_UHD
-class USRPRadio final : public IRadio {
-public:
-    explicit USRPRadio(const USRPDriver::Config& cfg) : usrp_(cfg) {
-        usrp_.init();
-        std::cout << usrp_.get_pp_string() << std::endl;
-    }
-
-    void start_rx_worker(size_t target_samps) override {
-        usrp_.start_rx_worker(target_samps);
-    }
-
-    void stop_rx_worker() override {
-        usrp_.stop_rx_worker();
-    }
-
-    void wait_rx_worker() override {
-        usrp_.wait_rx_worker();
-    }
-
-    VecComplex fetch_rx_buffer() override {
-        return usrp_.fetch_rx_buffer();
-    }
-
-    size_t send_burst(const VecComplex& samples) override {
-        return usrp_.send_burst(samples);
-    }
-
-private:
-    USRPDriver usrp_;
-};
-#endif
 
 int main() {
     try {
+        // =========================
+        // 模式选择
+        // =========================
+        RunMode mode = RunMode::LOOPBACK;
+        //RunMode mode = RunMode::AWGN;
+        // RunMode mode = RunMode::USRP;
+
+        double awgn_snr_db = 50.0;   // AWGN 模式下使用
 
         // =========================
         // 配置
         // =========================
         TransmitterConfig cfg;
-
         cfg.function = FunctionType::Telemetry;
-        cfg.modulation = ModulationType::QAM;
+        cfg.modulation = ModulationType::OOK;
 
         cfg.n = 10;
         cfg.frame_bit = 75;
         cfg.samp = 8;
         cfg.zp_sym = 33;
+        cfg.Rb = 18900;
 
-        cfg.Rb = 18900;   // ≈2 MHz
-
-        cfg.connect = true;
+        cfg.connect = (mode == RunMode::USRP);
 
         // =========================
         // TX / RX
         // =========================
         Transmitter tx(cfg);
-
         VecComplex one_frame_sig = tx.generateTransmitSignal();
         VecInt one_frame_bits = tx.getLastSourceBits();
 
@@ -117,8 +82,8 @@ int main() {
             << ", fs: " << tx.getFS() << " Hz\n";
 
         // =========================
-// TX burst
-// =========================
+        // TX burst
+        // =========================
         const int tx_repeat_frames = 20;
         const size_t pre_zeros = 200000;
         const size_t post_zeros = 5000;
@@ -133,9 +98,7 @@ int main() {
         tx_burst.insert(tx_burst.end(), pre_zeros, Complex(0.0, 0.0));
 
         for (int i = 0; i < tx_repeat_frames; ++i) {
-            tx_burst.insert(tx_burst.end(),
-                one_frame_sig.begin(),
-                one_frame_sig.end());
+            tx_burst.insert(tx_burst.end(), one_frame_sig.begin(), one_frame_sig.end());
         }
 
         tx_burst.insert(tx_burst.end(), post_zeros, Complex(0.0, 0.0));
@@ -144,73 +107,79 @@ int main() {
             << ", pre_zeros = " << pre_zeros
             << ", post_zeros = " << post_zeros << "\n";
 
+        // =========================
+        // 获取接收信号
+        // =========================
+        VecComplex rx_sig;
+
+        if (mode == RunMode::LOOPBACK) {
+            std::cout << "[MODE] LOOPBACK\n";
+            rx_sig = tx_burst;
+
+            std::cout << "TX burst samples: " << tx_burst.size() << "\n";
+            std::cout << "RX captured samples: " << rx_sig.size() << "\n";
+        }
+        else if (mode == RunMode::AWGN) {
+            std::cout << "[MODE] AWGN, SNR=" << awgn_snr_db << " dB\n";
+
+            rx_sig = Channel::awgn(tx_burst, awgn_snr_db);
+
+            std::cout << "TX burst samples: " << tx_burst.size() << "\n";
+            std::cout << "RX captured samples: " << rx_sig.size() << "\n";
+        }
+        else if (mode == RunMode::USRP) {
 #ifdef WITH_UHD
+            std::cout << "[MODE] USRP\n";
 
-        // =========================
-        // USRP 参数
-        // =========================
-        USRPDriver::Config uc;
+            USRPDriver::Config uc;
+            uc.device_args = "type=b200";
+            uc.sample_rate = tx.getFS();
+            uc.center_freq = 2.45e9;
+            uc.tx_gain = 35;
+            uc.rx_gain = 40;
+            uc.tx_antenna = "TX/RX";
+            uc.rx_antenna = "RX2";
 
-        uc.device_args = "type=b200";
-        uc.sample_rate = tx.getFS();
-        uc.center_freq = 2.45e9;
+            USRPDriver usrp(uc);
+            usrp.init();
 
-        uc.tx_gain = 35;
-        uc.rx_gain = 40;
+            std::cout << "[USRP CFG] sample_rate = " << uc.sample_rate
+                << ", fc = " << uc.center_freq
+                << ", tx_gain = " << uc.tx_gain
+                << ", rx_gain = " << uc.rx_gain << "\n";
 
-        uc.tx_antenna = "TX/RX";
-        uc.rx_antenna = "RX2";
+            const int rx_extra_frames = 10;
+            const size_t rx_need =
+                tx_burst.size() + (size_t)rx_extra_frames * one_frame_sig.size();
 
-        std::unique_ptr<IRadio> radio =
-            std::make_unique<USRPRadio>(uc);
+            std::cout << "[RX CFG] rx_extra_frames = " << rx_extra_frames
+                << ", rx_need = " << rx_need << "\n";
 
-        std::cout << "[MODE] USRP\n";
-        std::cout << "[USRP CFG] sample_rate = " << uc.sample_rate
-            << ", fc = " << uc.center_freq
-            << ", tx_gain = " << uc.tx_gain
-            << ", rx_gain = " << uc.rx_gain << "\n";
+            // 旧接口：异步接收线程
+            usrp.start_rx_worker(rx_need);
 
-        // =========================
-        // RX 长度
-        // =========================
-        const int rx_extra_frames = 10;
-        const size_t rx_need =
-            tx_burst.size() + (size_t)rx_extra_frames * one_frame_sig.size();
+            // 给 RX 一点时间进入接收状态
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-        std::cout << "[RX CFG] rx_extra_frames = " << rx_extra_frames
-            << ", rx_need = " << rx_need << "\n";
+            size_t tx_sent = usrp.send_burst(tx_burst);
 
-        // =========================
-        // 启动 RX 线程
-        // =========================
-        radio->start_rx_worker(rx_need);
+            usrp.wait_rx_worker();
+            usrp.stop_rx_worker();
 
-        // 等 RX 线程真正进入 recv()
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            rx_sig = usrp.fetch_rx_buffer();
 
-        // =========================
-        // 发送 burst
-        // =========================
-        const size_t tx_sent = radio->send_burst(tx_burst);
-
-        // =========================
-        // 等 RX 结束
-        // =========================
-        radio->wait_rx_worker();
-
-        VecComplex rx_sig = radio->fetch_rx_buffer();
-        const size_t rx_got = rx_sig.size();
-
-        std::cout << "TX burst samples: " << tx_burst.size()
-            << ", actually sent: " << tx_sent << "\n";
-
-        std::cout << "RX requested samples: " << rx_need
-            << ", captured samples: " << rx_got << "\n";
-
+            std::cout << "TX burst samples: " << tx_burst.size()
+                << ", actually sent: " << tx_sent << "\n";
+            std::cout << "RX captured samples: " << rx_sig.size() << "\n";
 #else
-        std::cerr << "UHD disabled\n";
-        return 1;
+            std::cerr << "UHD disabled\n";
+            return 1;
 #endif
+        }
+        else {
+            std::cerr << "Unknown mode\n";
+            return 1;
+        }
 
         // =========================
         // 接收信号统计
@@ -245,7 +214,8 @@ int main() {
         std::cout << "RX bits total: " << rx_bits.size() << "\n";
 
         const size_t bits_per_frame = one_frame_bits.size();
-        const size_t decoded_frames = (bits_per_frame > 0) ? (rx_bits.size() / bits_per_frame) : 0;
+        const size_t decoded_frames =
+            (bits_per_frame > 0) ? (rx_bits.size() / bits_per_frame) : 0;
 
         size_t total_compared_bits = 0;
         size_t total_bit_errors = 0;
