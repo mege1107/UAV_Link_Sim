@@ -124,7 +124,9 @@ static TestResult run_one_test(
     std::time_t now = std::time(nullptr);
 
     std::cout << "========================================\n";
-    std::cout << "[TEST] Time: " << std::ctime(&now);
+    char time_buf[64] = {};
+    ctime_s(time_buf, sizeof(time_buf), &now);
+    std::cout << "[TEST] Time: " << time_buf;
     std::cout << "[TEST] Mode: " << mode_to_string(mode) << "\n";
     std::cout << "[TEST] Modulation: " << modulation_to_string(cfg.modulation) << "\n";
     std::cout << "[TEST] Frames: " << tx_repeat_frames << "\n";
