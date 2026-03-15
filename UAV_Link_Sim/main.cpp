@@ -88,8 +88,8 @@ int main() {
         // =========================
         TransmitterConfig cfg;
 
-        cfg.function = FunctionType::RemoteControl;
-        cfg.modulation = ModulationType::MSK;
+        cfg.function = FunctionType::Telemetry;
+        cfg.modulation = ModulationType::QAM;
 
         cfg.n = 10;
         cfg.frame_bit = 75;
@@ -119,7 +119,7 @@ int main() {
         // =========================
 // TX burst
 // =========================
-        const int tx_repeat_frames = 10;
+        const int tx_repeat_frames = 20;
         const size_t pre_zeros = 200000;
         const size_t post_zeros = 5000;
 
@@ -155,8 +155,8 @@ int main() {
         uc.sample_rate = tx.getFS();
         uc.center_freq = 2.45e9;
 
-        uc.tx_gain = 30;
-        uc.rx_gain = 30;
+        uc.tx_gain = 35;
+        uc.rx_gain = 40;
 
         uc.tx_antenna = "TX/RX";
         uc.rx_antenna = "RX2";

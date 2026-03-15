@@ -8,9 +8,159 @@
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <numeric>
 
 static inline Complex cexpj(double a) {
     return Complex(std::cos(a), std::sin(a));
+}
+
+// =============== 一些本地辅助函数 ===============
+
+static std::vector<double> designLowpassFIR(int num_taps, double cutoff_norm)
+{
+    // cutoff_norm: 相对 Nyquist 归一化频率，范围 (0, 1)
+    // MATLAB fir1(N, Wn) 中 Wn 也是相对 Nyquist 归一化
+    if (num_taps < 3) num_taps = 3;
+    if ((num_taps & 1) == 0) num_taps += 1; // 用奇数 taps 更方便
+    cutoff_norm = std::max(1e-4, std::min(0.999, cutoff_norm));
+
+    std::vector<double> h((size_t)num_taps, 0.0);
+    const int M = num_taps - 1;
+    const double fc = cutoff_norm; // 相对 Nyquist
+
+    for (int n = 0; n < num_taps; ++n) {
+        const int m = n - M / 2;
+
+        double sinc_val = 0.0;
+        if (m == 0) {
+            sinc_val = fc;
+        }
+        else {
+            sinc_val = std::sin(PI * fc * m) / (PI * m);
+        }
+
+        // Hamming 窗
+        const double w = 0.54 - 0.46 * std::cos(2.0 * PI * n / M);
+        h[(size_t)n] = sinc_val * w;
+    }
+
+    // 归一化 DC 增益
+    double sum_h = std::accumulate(h.begin(), h.end(), 0.0);
+    if (std::abs(sum_h) > 1e-12) {
+        for (auto& v : h) v /= sum_h;
+    }
+
+    return h;
+}
+
+static VecComplex applyFIRAndAlign(const VecComplex& x, const std::vector<double>& h)
+{
+    if (x.empty() || h.empty()) return x;
+
+    const int L = (int)h.size();
+    const int delay = (L - 1) / 2;
+
+    VecComplex y(x.size() + (size_t)L - 1, Complex(0.0, 0.0));
+
+    for (size_t n = 0; n < y.size(); ++n) {
+        Complex acc(0.0, 0.0);
+        for (int k = 0; k < L; ++k) {
+            if ((int)n - k < 0) continue;
+            const size_t idx = (size_t)((int)n - k);
+            if (idx >= x.size()) continue;
+            acc += x[idx] * h[(size_t)k];
+        }
+        y[n] = acc;
+    }
+
+    // 群时延补偿，输出长度对齐回原长度
+    VecComplex out;
+    out.reserve(x.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        const size_t src = i + (size_t)delay;
+        if (src < y.size()) out.push_back(y[src]);
+        else out.push_back(Complex(0.0, 0.0));
+    }
+    return out;
+}
+
+static double computePercentile(std::vector<double> v, double p01)
+{
+    if (v.empty()) return 0.0;
+    p01 = std::max(0.0, std::min(1.0, p01));
+    const size_t k = (size_t)std::floor(p01 * (double)(v.size() - 1));
+    std::nth_element(v.begin(), v.begin() + (long long)k, v.end());
+    return v[k];
+}
+
+static double estimateOOKThresholdAdaptive(const VecComplex& rx)
+{
+    if (rx.empty()) return 0.5;
+
+    std::vector<double> amp;
+    amp.reserve(rx.size());
+    for (const auto& v : rx) amp.push_back(std::abs(v));
+
+    // 类似 MATLAB：估计低能量区域的噪声水平
+    const double p = 1e-3;
+    const double th_low = computePercentile(amp, 0.10);
+
+    double sum_noise = 0.0;
+    int cnt_noise = 0;
+    for (double a : amp) {
+        if (a <= th_low) {
+            sum_noise += a;
+            cnt_noise++;
+        }
+    }
+
+    double noise_level = (cnt_noise > 0) ? (sum_noise / cnt_noise) : 0.0;
+    double Thsd = noise_level * std::sqrt(std::log(1.0 / p));
+
+    // 防止阈值太低
+    if (!std::isfinite(Thsd) || Thsd <= 0.0) {
+        double mean_amp = std::accumulate(amp.begin(), amp.end(), 0.0) / (double)amp.size();
+        Thsd = 0.3 * mean_amp;
+    }
+
+    return Thsd;
+}
+
+static void normalizeQAMSymbolsAdaptive(VecComplex& syms)
+{
+    if (syms.empty()) return;
+
+    // 先按平均功率归一到 16QAM 理想平均功率 1
+    double avg_power = 0.0;
+    for (const auto& v : syms) avg_power += std::norm(v);
+    avg_power /= (double)syms.size();
+
+    if (avg_power > 1e-12 && std::isfinite(avg_power)) {
+        const double scale = 1.0 / std::sqrt(avg_power);
+        for (auto& v : syms) v *= scale;
+    }
+
+    // 再做一个简单轴向拉伸自适应：让 I/Q 的平均绝对值更接近理想 16QAM
+    // 对归一化 16QAM，E|I| = E|Q| = 2/sqrt(10)
+    double mean_abs_I = 0.0;
+    double mean_abs_Q = 0.0;
+    for (const auto& v : syms) {
+        mean_abs_I += std::abs(v.real());
+        mean_abs_Q += std::abs(v.imag());
+    }
+    mean_abs_I /= (double)syms.size();
+    mean_abs_Q /= (double)syms.size();
+
+    const double target = 2.0 / std::sqrt(10.0);
+
+    double scale_I = 1.0;
+    double scale_Q = 1.0;
+    if (mean_abs_I > 1e-12 && std::isfinite(mean_abs_I)) scale_I = target / mean_abs_I;
+    if (mean_abs_Q > 1e-12 && std::isfinite(mean_abs_Q)) scale_Q = target / mean_abs_Q;
+
+    for (auto& v : syms) {
+        v = Complex(v.real() * scale_I, v.imag() * scale_Q);
+    }
 }
 
 // =============== 归一化相关 metric（给定绝对位置） ===============
@@ -182,20 +332,33 @@ void Receiver::resetFreqHistory() {
     frame_count_ = 0;
 }
 
-// ====================== 辅助：每符号挑最大能量采样点 ======================
-Complex Receiver::pickBestSampleInSymbol(const VecComplex& rx, size_t base, int s) const
+// ====================== 每组求均值（对齐 MATLAB mean_groups） ======================
+VecComplex Receiver::meanGroups(const VecComplex& rx, int s) const
 {
-    int best_j = 0;
-    double best_e = -1.0;
+    VecComplex out;
+    if (s <= 0) return out;
 
-    for (int j = 0; j < s; ++j) {
-        double e = std::norm(rx[base + (size_t)j]);
-        if (e > best_e) {
-            best_e = e;
-            best_j = j;
+    const size_t nsym = rx.size() / (size_t)s;
+    out.reserve(nsym);
+
+    for (size_t k = 0; k < nsym; ++k) {
+        Complex acc(0.0, 0.0);
+        for (int j = 0; j < s; ++j) {
+            acc += rx[k * (size_t)s + (size_t)j];
         }
+        out.push_back(acc / (double)s);
     }
-    return rx[base + (size_t)best_j];
+
+    return out;
+}
+
+// ====================== 取每个 symbol 中点采样（对齐 MATLAB round(samp/2)） ======================
+Complex Receiver::pickMidSampleInSymbol(const VecComplex& rx, size_t base, int s) const
+{
+    if (s <= 0) return Complex(0.0, 0.0);
+    size_t idx = base + (size_t)(s / 2);
+    if (idx >= rx.size()) return Complex(0.0, 0.0);
+    return rx[idx];
 }
 
 // ====================== payload长度：按调制方式计算 ======================
@@ -286,9 +449,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const int fine_sync_len = (int)sync_fine.size();
 
     // 2) 单帧长度（按 RS 编码后的 payload 算）
-    const int source_bits = config_.frame_bit * config_.n;   // 原始信息位
-    const int rs_msg_bits = 15 * 5;                          // 75
-    const int rs_code_bits = 31 * 5;                         // 155
+    const int source_bits = config_.frame_bit * config_.n;
+    const int rs_msg_bits = 15 * 5;   // 75
+    const int rs_code_bits = 31 * 5;  // 155
 
     if (source_bits % rs_msg_bits != 0) {
         std::cerr << "[Receiver] ERROR: source_bits is not a multiple of 75\n";
@@ -335,7 +498,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     size_t current_offset = 0;
     const size_t total_rx_len = rx_signal.size();
 
-    // 调试阶段先放低
     const double sync_threshold = 0.02;
     const size_t W = (size_t)(2 * s);
 
@@ -348,7 +510,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         bool ok = false;
 
         if (!acquired) {
-            // ================= 首帧：全局搜索 =================
             size_t win_start = 0;
             size_t win_end = total_rx_len;
 
@@ -371,7 +532,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             acquired = true;
         }
         else {
-            // ================= 后续帧：局部跟踪 =================
             sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
             ok = (sync_metric >= sync_threshold);
 
@@ -465,6 +625,15 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             const int total_pulses = ccsk_chip_num / 32;
             payload_sig = dehopRemoteControlPayload(payload_with_gap, total_pulses, pulse_len, gap_len);
         }
+        else {
+            // 遥测模式：QPSK / QAM / OOK 先做低通；BPSK 先保留原始链路
+            if (config_.modulation == ModulationType::QPSK ||
+                config_.modulation == ModulationType::QAM ||
+                config_.modulation == ModulationType::OOK) {
+                std::vector<double> fir_lp = designLowpassFIR(129, 4.0 / (double)s);
+                payload_sig = applyFIRAndAlign(payload_sig, fir_lp);
+            }
+        }
 
         // ====== 解调 ======
         VecInt rx_chips_or_syms = demodulateTelemetry(payload_sig);
@@ -525,7 +694,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             << "，解调比特数：" << rx_source_bits.size()
             << "\n";
 
-        // 下一帧按“当前检测到的这一帧末尾”继续
         current_offset = frame_abs_end;
     }
 
@@ -539,7 +707,18 @@ VecInt Receiver::demodulateBPSK(const VecComplex& rx)
     const int s = std::max(1, config_.samp);
 
     for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        Complex sym = pickBestSampleInSymbol(rx, base, s);
+        int best_j = 0;
+        double best_e = -1.0;
+
+        for (int j = 0; j < s; ++j) {
+            double e = std::norm(rx[base + (size_t)j]);
+            if (e > best_e) {
+                best_e = e;
+                best_j = j;
+            }
+        }
+
+        Complex sym = rx[base + (size_t)best_j];
         bits.push_back(sym.real() > 0.0 ? 1 : 0);
     }
 
@@ -547,7 +726,7 @@ VecInt Receiver::demodulateBPSK(const VecComplex& rx)
 }
 
 // ====================== QPSK ======================
-// 对应发射端 qpskmod 的映射：
+// 保持你原来的 bit 映射：
 // 00 -> (+,+)
 // 01 -> (+,-)
 // 10 -> (-,+)
@@ -557,9 +736,12 @@ VecInt Receiver::demodulateQPSK(const VecComplex& rx)
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
-    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        Complex sym = pickBestSampleInSymbol(rx, base, s);
+    VecComplex syms = meanGroups(rx, s);
+    if (syms.empty()) return {};
 
+    std::cout << "[DBG][QPSK] mean_groups symbols = " << syms.size() << "\n";
+
+    for (const auto& sym : syms) {
         int b0 = (sym.real() < 0.0) ? 1 : 0;
         int b1 = (sym.imag() < 0.0) ? 1 : 0;
 
@@ -607,13 +789,17 @@ VecInt Receiver::demodulateQAM16(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
-    const double norm = std::sqrt(10.0);
 
-    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        Complex sym = pickBestSampleInSymbol(rx, base, s);
+    VecComplex syms = meanGroups(rx, s);
+    if (syms.empty()) return {};
 
-        double I = sym.real() * norm;
-        double Q = sym.imag() * norm;
+    normalizeQAMSymbolsAdaptive(syms);
+
+    std::cout << "[DBG][QAM16] mean_groups symbols = " << syms.size() << "\n";
+
+    for (const auto& sym : syms) {
+        double I = sym.real() * std::sqrt(10.0);
+        double Q = sym.imag() * std::sqrt(10.0);
 
         int I_level = nearest_qam_level(I);
         int Q_level = nearest_qam_level(Q);
@@ -637,12 +823,12 @@ VecInt Receiver::demodulateOOK(const VecComplex& rx)
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
+    const double Thsd = estimateOOKThresholdAdaptive(rx);
+    std::cout << "[DBG][OOK] adaptive threshold = " << Thsd << "\n";
+
     for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        double best_amp = 0.0;
-        for (int j = 0; j < s; ++j) {
-            best_amp = std::max(best_amp, std::abs(rx[base + (size_t)j]));
-        }
-        bits.push_back(best_amp > 0.5 ? 1 : 0);
+        Complex sym = pickMidSampleInSymbol(rx, base, s);
+        bits.push_back(std::abs(sym) > Thsd ? 1 : 0);
     }
 
     return bits;
@@ -654,7 +840,6 @@ VecInt Receiver::demodulateFSK(const VecComplex& rx)
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
-    // 与 transmitter.cpp 中保持一致
     const double deta_f = 1e6;
     const double fs = config_.fs;
 
@@ -680,8 +865,6 @@ VecInt Receiver::demodulateFSK(const VecComplex& rx)
 }
 
 // ====================== FM ======================
-// 发射端 fmmod 内部先 d_encode，再做双极性、升余弦、积分调相。
-// 这里用相邻采样差分相位做频率判决，再按每 symbol 求和取符号。
 VecInt Receiver::demodulateFM(const VecComplex& rx)
 {
     VecInt bits;
@@ -708,13 +891,13 @@ VecInt Receiver::demodulateFM(const VecComplex& rx)
     return bits;
 }
 
+// ====================== MSK ======================
 VecInt Receiver::demodulateMSK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
     if (rx.size() < (size_t)s) return {};
 
-    // 4个相位状态：0, pi/2, pi, 3pi/2
     const double phase_table[4] = { 0.0, PI / 2.0, PI, 3.0 * PI / 2.0 };
 
     auto build_template = [&](int state_idx, int bit_val) -> VecComplex {
@@ -735,14 +918,12 @@ VecInt Receiver::demodulateMSK(const VecComplex& rx)
         return tmpl;
         };
 
-    // 预生成模板
     VecComplex tmpl[4][2];
     for (int st = 0; st < 4; ++st) {
         tmpl[st][0] = build_template(st, 0);
         tmpl[st][1] = build_template(st, 1);
     }
 
-    // 发射端初始 phase = 0
     int state = 0;
 
     const size_t nsym = rx.size() / (size_t)s;
@@ -770,11 +951,10 @@ VecInt Receiver::demodulateMSK(const VecComplex& rx)
 
         bits.push_back(best_bit);
 
-        // 状态更新要和发射端一致
         if (best_bit == 1)
-            state = (state + 1) & 3;   // +pi/2
+            state = (state + 1) & 3;
         else
-            state = (state + 3) & 3;   // -pi/2
+            state = (state + 3) & 3;
     }
 
     return bits;
@@ -788,7 +968,6 @@ VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_ga
     VecComplex out = payload_with_gap;
     if (out.empty() || total_pulses <= 0 || pulse_len <= 0) return out;
 
-    // 发射端用的就是这个固定跳频序列生成方式
     VecDouble frq_seq = generate_sequence(-13, 13, 3, total_pulses, 1);
 
     const double fs = config_.fs;
@@ -802,7 +981,7 @@ VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_ga
 
         for (int j = 0; j < pulse_len; ++j) {
             const double t = (double)j / fs;
-            const double ang = -2.0 * PI * f * t;   // 乘共轭，解跳频
+            const double ang = -2.0 * PI * f * t;
             out[pos + (size_t)j] *= Complex(std::cos(ang), std::sin(ang));
         }
 
