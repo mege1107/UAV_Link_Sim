@@ -498,8 +498,13 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     size_t current_offset = 0;
     const size_t total_rx_len = rx_signal.size();
 
-    const double sync_threshold = 0.02;
+    // 后续帧跟踪阈值：不要太低，避免局部误锁
+    const double sync_threshold = 0.08;
     const size_t W = (size_t)(2 * s);
+
+    // 首帧专用：全局找“最早有效峰”
+    const double first_sync_threshold = 0.4;   // 可按实际改成 0.35~0.50
+    const size_t first_refine_W = (size_t)(2 * s);
 
     bool acquired = false;
 
@@ -510,28 +515,54 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         bool ok = false;
 
         if (!acquired) {
-            size_t win_start = 0;
-            size_t win_end = total_rx_len;
+            // ===== 首帧：全局从前往后找第一个超过高阈值的位置 =====
+            bool found_candidate = false;
+            size_t cand_idx = 0;
+
+            const size_t search_end = total_rx_len - (size_t)sync_len;
+            for (size_t i = 0; i <= search_end; ++i) {
+                double m = metricAtNormalized(rx_signal, i, SYNC);
+                if (m >= first_sync_threshold) {
+                    cand_idx = i;
+                    found_candidate = true;
+                    break;
+                }
+            }
+
+            if (!found_candidate) {
+                std::cout << "[Receiver] 首帧未找到超过阈值的同步候选，解调结束\n";
+                break;
+            }
+
+            // ===== 在候选点附近小窗精搜索，避免锁在峰的边沿 =====
+            size_t win_start = (cand_idx > first_refine_W) ? (cand_idx - first_refine_W) : 0;
+            size_t win_end = std::min(total_rx_len, cand_idx + first_refine_W + (size_t)sync_len);
 
             int best_rel = 0;
             double best_m = 0.0;
             if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                std::cout << "[Receiver] 首帧全局搜索失败，解调结束\n";
+                std::cout << "[Receiver] 首帧候选附近精搜索失败，解调结束\n";
                 break;
             }
 
             sync_abs_start = win_start + (size_t)best_rel;
             sync_metric = best_m;
-            ok = (sync_metric >= sync_threshold);
+            ok = (sync_metric >= first_sync_threshold);
 
             if (!ok) {
                 std::cout << "[Receiver] 首帧同步峰值过低(" << sync_metric << ")，解调结束\n";
                 break;
             }
 
+            std::cout << "[DBG][FIRST] cand_idx=" << cand_idx
+                << " refined_sync_abs_start=" << sync_abs_start
+                << " metric=" << sync_metric << "\n";
+
             acquired = true;
         }
         else {
+            // ===== 后续帧：按预测位置局部跟踪 =====
+            sync_abs_start = current_offset;
             sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
             ok = (sync_metric >= sync_threshold);
 
@@ -586,7 +617,14 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         double f_hat = fit_a_ * frame_count_ + fit_b_;
         if (!std::isfinite(f_hat)) f_hat = 0.0;
 
-        if (config_.enable_cfo && f_hat != 0.0) {
+        // 只对真正依赖载波相位/频率精确对齐的调制做 CFO 校正
+        const bool need_cfo_correction =
+            (config_.modulation == ModulationType::BPSK ||
+                config_.modulation == ModulationType::QPSK ||
+                config_.modulation == ModulationType::QAM ||
+                config_.modulation == ModulationType::FM);
+
+        if (config_.enable_cfo && need_cfo_correction && f_hat != 0.0) {
             for (size_t n = 0; n < current_frame.size(); ++n) {
                 double t = (double)n / fs;
                 double ang = 2.0 * PI * f_hat * t;
@@ -601,7 +639,14 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         double residual_phase = estimateResidualPhase(rx_fine_sync_corrected, sync_fine);
         if (!std::isfinite(residual_phase)) residual_phase = 0.0;
 
-        if (residual_phase != 0.0) {
+        // 只对相位型调制做常相位补偿
+        const bool need_phase_rotation =
+            (config_.modulation == ModulationType::BPSK ||
+                config_.modulation == ModulationType::QPSK ||
+                config_.modulation == ModulationType::QAM ||
+                config_.modulation == ModulationType::FM);
+
+        if (need_phase_rotation && residual_phase != 0.0) {
             Complex ph_rot = std::conj(Complex(std::cos(residual_phase), std::sin(residual_phase)));
             for (auto& v : current_frame) v *= ph_rot;
         }
@@ -623,10 +668,35 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             const int pulse_len = (int)config_.ccskcode.size() * s;
             const int gap_len = 33 * s;
             const int total_pulses = ccsk_chip_num / 32;
+
+            // 1) 先解跳频
             payload_sig = dehopRemoteControlPayload(payload_with_gap, total_pulses, pulse_len, gap_len);
+
+            // 2) 再去掉每个 pulse 后面的 gap，只保留有效 payload
+            VecComplex depulsed;
+            depulsed.reserve((size_t)total_pulses * (size_t)pulse_len);
+
+            size_t pos = 0;
+            for (int p = 0; p < total_pulses; ++p) {
+                if (pos + (size_t)pulse_len > payload_sig.size()) break;
+
+                depulsed.insert(depulsed.end(),
+                    payload_sig.begin() + pos,
+                    payload_sig.begin() + pos + (size_t)pulse_len);
+
+                pos += (size_t)pulse_len;
+
+                if (pos + (size_t)gap_len <= payload_sig.size()) {
+                    pos += (size_t)gap_len;
+                }
+            }
+
+            payload_sig.swap(depulsed);
+
+            std::cout << "[DBG] depulsed payload samples=" << payload_sig.size() << "\n";
         }
         else {
-            // 遥测模式：QPSK / QAM / OOK 先做低通；BPSK 先保留原始链路
+            // 遥测模式：QPSK / QAM / OOK 先做低通；BPSK / FSK / FM / MSK 保持原链路
             if (config_.modulation == ModulationType::QPSK ||
                 config_.modulation == ModulationType::QAM ||
                 config_.modulation == ModulationType::OOK) {
@@ -642,12 +712,10 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             break;
         }
 
-        // BPSK / FM 等需要差分解码
         if (modulationNeedsDiffDecode()) {
             rx_chips_or_syms = d_decode(rx_chips_or_syms);
         }
 
-        // 长度保护：只取本帧应有的 chip 数
         if ((int)rx_chips_or_syms.size() > ccsk_chip_num) {
             rx_chips_or_syms.resize((size_t)ccsk_chip_num);
         }
@@ -659,7 +727,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             break;
         }
 
-        // ====== 解扩 ======
         VecInt rx_encoded_bits = despreadCCSK(rx_chips_or_syms);
         if (rx_encoded_bits.empty()) {
             std::cout << "[Receiver] 解扩失败，解调结束\n";
@@ -679,7 +746,6 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         std::cout << "[DBG][RX] ccsk_decoded bits = " << rx_encoded_bits.size() << "\n";
 
-        // ====== RS 解码 ======
         VecInt rx_source_bits = HXL_RSDecode(rx_encoded_bits, 31, 15);
         if (rx_source_bits.empty()) {
             std::cout << "[Receiver] RS 解码失败，解调结束\n";
@@ -822,13 +888,68 @@ VecInt Receiver::demodulateOOK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
+    if (rx.empty()) return bits;
 
-    const double Thsd = estimateOOKThresholdAdaptive(rx);
-    std::cout << "[DBG][OOK] adaptive threshold = " << Thsd << "\n";
+    // 每个 symbol 用“最大若干个采样幅度的平均”作为统计量
+    // 比单纯 max 更抗噪声尖峰，同时仍保留 OOK 的幅度差异
+    std::vector<double> sym_amp;
+    sym_amp.reserve(rx.size() / (size_t)s);
+
+    const int top_k = std::max(1, s / 4); // 可调：s/4 通常比较稳
 
     for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        Complex sym = pickMidSampleInSymbol(rx, base, s);
-        bits.push_back(std::abs(sym) > Thsd ? 1 : 0);
+        std::vector<double> amps;
+        amps.reserve((size_t)s);
+
+        for (int j = 0; j < s; ++j) {
+            amps.push_back(std::abs(rx[base + (size_t)j]));
+        }
+
+        // 取最大的 top_k 个样本做平均
+        std::nth_element(
+            amps.begin(),
+            amps.end() - top_k,
+            amps.end()
+        );
+
+        double acc = 0.0;
+        for (auto it = amps.end() - top_k; it != amps.end(); ++it) {
+            acc += *it;
+        }
+
+        sym_amp.push_back(acc / (double)top_k);
+    }
+
+    if (sym_amp.empty()) return bits;
+
+    // 用百分位数而不是 min/max 来估门限，避免少量异常值把门限拉坏
+    std::vector<double> sorted_amp = sym_amp;
+    std::sort(sorted_amp.begin(), sorted_amp.end());
+
+    auto percentile = [&](double p) -> double {
+        p = std::max(0.0, std::min(1.0, p));
+        size_t idx = (size_t)std::floor(p * (sorted_amp.size() - 1));
+        return sorted_amp[idx];
+        };
+
+    const double p10 = percentile(0.10);
+    const double p90 = percentile(0.90);
+    double th = 0.5 * (p10 + p90);
+
+    // 退化保护：如果这一帧高低两簇分离很差，就退回均值门限
+    if (!std::isfinite(th) || (p90 - p10) < 1e-8) {
+        th = std::accumulate(sym_amp.begin(), sym_amp.end(), 0.0) / (double)sym_amp.size();
+    }
+
+    std::cout << "[DBG][OOK] p10=" << p10
+        << " p90=" << p90
+        << " th=" << th
+        << " top_k=" << top_k
+        << "\n";
+
+    bits.reserve(sym_amp.size());
+    for (double a : sym_amp) {
+        bits.push_back(a > th ? 1 : 0);
     }
 
     return bits;
@@ -968,7 +1089,7 @@ VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_ga
     VecComplex out = payload_with_gap;
     if (out.empty() || total_pulses <= 0 || pulse_len <= 0) return out;
 
-    VecDouble frq_seq = generate_sequence(-13, 13, 3, total_pulses, 1);
+    VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, 1);
 
     const double fs = config_.fs;
     if (!std::isfinite(fs) || fs <= 0.0) return out;

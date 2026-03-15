@@ -112,7 +112,7 @@ VecComplex Transmitter::generateTransmitSignal() {
         txSig = mskmod(tx_bits_mat, config_.samp);
 
         const int total_pulses = static_cast<int>(ccsk_msg.size() / 32);
-        VecDouble frq_seq = generate_sequence(-13, 13, 3, total_pulses, 1);
+        VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, 1);
 
         txSig = frequencyHop(txSig, frq_seq, pulse_len, nt, config_.fs);
 
