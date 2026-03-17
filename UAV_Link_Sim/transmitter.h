@@ -8,6 +8,9 @@
 #include "frequency_hop.h"
 #include "utils.h"
 
+#include <string>
+#include <vector>
+
 class Transmitter {
 public:
     explicit Transmitter(const TransmitterConfig& config);
@@ -31,9 +34,24 @@ private:
     TransmitterConfig config_;
 
     void calculateFS();
-    VecInt generateSourceData();
 
-    // 遥控模式：把“已完成MSK+跳频”的信号重新组织成 pulse + gap
+    // 保留原随机信源
+    VecInt generateRandomSourceData();
+
+    // 新增文件信源
+    VecInt generateFileSourceBits();
+
+    // 文件工具函数
+    static std::string extractFilename(const std::string& fullpath);
+    static std::string detectFileExtensionLower(const std::string& filename);
+    static int fileTypeFromExtension(const std::string& ext);
+
+    static std::vector<unsigned char> readBinaryFile(const std::string& filepath);
+    static VecInt bytesToBits(const std::vector<unsigned char>& bytes);
+    static void appendUint16(std::vector<unsigned char>& out, unsigned short v);
+    static void appendUint64(std::vector<unsigned char>& out, unsigned long long v);
+    static VecInt buildFilePacketBits(const std::string& filepath);
+
     VecComplex buildRemoteControlPulse(
         const VecComplex& hoppedSig,
         int pulse_len,

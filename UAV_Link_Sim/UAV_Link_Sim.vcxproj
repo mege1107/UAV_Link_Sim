@@ -117,6 +117,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>D:\UHD\include</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -129,6 +130,7 @@
     <ClInclude Include="channel.h" />
     <ClInclude Include="coding.h" />
     <ClInclude Include="common_defs.h" />
+    <ClInclude Include="file_transfer.h" />
     <ClInclude Include="frequency_hop.h" />
     <ClInclude Include="modulation.h" />
     <ClInclude Include="radio_if.h" />
@@ -143,6 +145,7 @@
   <ItemGroup>
     <ClCompile Include="channel.cpp" />
     <ClCompile Include="coding.cpp" />
+    <ClCompile Include="file_transfer.cpp" />
     <ClCompile Include="frequency_hop.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="modulation.cpp" />

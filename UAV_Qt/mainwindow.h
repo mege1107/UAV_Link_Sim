@@ -3,6 +3,7 @@
 
 #include <QMainWindow>
 #include <QFutureWatcher>
+#include <QString>
 
 // Qt Charts
 #include <QtCharts/QChartView>
@@ -37,10 +38,18 @@ private slots:
 
     void on_comboMode_currentTextChanged(const QString &text);
 
+    void on_checkFileTransfer_toggled(bool checked);
+    void on_btnBrowseInput_clicked();
+    void on_btnBrowseOutput_clicked();
+    void on_btnOpenOutput_clicked();
+
 private:
     void initBerChart();
     void plotSingleBerPoint(double snrDb, double ber);
     void plotBerCurve(const SweepResult& sr);
+
+    void updateUiState();
+    bool isFileTransferMode() const;
 
 private:
     Ui::MainWindow *ui;
@@ -49,6 +58,8 @@ private:
     QFutureWatcher<SweepResult> sweepWatcher;
 
     QChartView *berChartView = nullptr;
+
+    QString lastSavedFilePath;
 };
 
 #endif

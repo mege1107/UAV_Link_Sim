@@ -19,6 +19,10 @@ struct TestResult {
     size_t decoded_frames = 0;
     double total_ber = 0.0;
 
+    // 文件传输时可用
+    bool file_saved = false;
+    std::string saved_file_path;
+
     std::string log_text;
 };
 
@@ -48,10 +52,27 @@ std::string modulation_to_string(ModulationType m);
 ModulationType parse_modulation(const std::string& s);
 RunMode parse_mode(const std::string& s);
 
+// =========================
+// 原有随机 bit 测试：保留
+// =========================
 TestResult run_one_test(
     RunMode mode,
     double awgn_snr_db,
     int tx_repeat_frames,
     double center_freq_hz,
     ModulationType modulation
+);
+
+// =========================
+// 新增：文件传输测试
+// input_file_path: 要发送的 txt/jpg/mp4 等文件
+// output_file_path: 接收端恢复后保存到哪里
+// =========================
+TestResult run_file_transfer_test(
+    RunMode mode,
+    double awgn_snr_db,
+    double center_freq_hz,
+    ModulationType modulation,
+    const std::string& input_file_path,
+    const std::string& output_file_path
 );

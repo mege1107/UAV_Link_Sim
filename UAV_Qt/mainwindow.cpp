@@ -7,6 +7,12 @@
 #include <QtCharts/QAbstractAxis>
 #include <algorithm>
 
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QMessageBox>
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -60,13 +66,73 @@ MainWindow::MainWindow(QWidget *parent)
             this,
             &MainWindow::on_comboMode_currentTextChanged);
 
+    connect(ui->checkFileTransfer, &QCheckBox::toggled,
+            this, &MainWindow::on_checkFileTransfer_toggled);
+
+    connect(ui->btnBrowseInput, &QPushButton::clicked,
+            this, &MainWindow::on_btnBrowseInput_clicked);
+
+    connect(ui->btnBrowseOutput, &QPushButton::clicked,
+            this, &MainWindow::on_btnBrowseOutput_clicked);
+
+    connect(ui->btnOpenOutput, &QPushButton::clicked,
+            this, &MainWindow::on_btnOpenOutput_clicked);
+
     initBerChart();
-    on_comboMode_currentTextChanged(ui->comboMode->currentText());
+    updateUiState();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+bool MainWindow::isFileTransferMode() const
+{
+    return ui->checkFileTransfer && ui->checkFileTransfer->isChecked();
+}
+
+void MainWindow::updateUiState()
+{
+    const QString modeText = ui->comboMode->currentText();
+    const bool fileMode = isFileTransferMode();
+
+    if (modeText == "AWGN")
+    {
+        ui->spinSNR->setEnabled(true);
+        ui->spinFcGHz->setEnabled(false);
+
+        ui->spinSNRStart->setEnabled(!fileMode);
+        ui->spinSNREnd->setEnabled(!fileMode);
+        ui->spinSNRStep->setEnabled(!fileMode);
+        ui->btnSweep->setEnabled(!fileMode);
+    }
+    else if (modeText == "LOOPBACK")
+    {
+        ui->spinSNR->setEnabled(false);
+        ui->spinFcGHz->setEnabled(false);
+
+        ui->spinSNRStart->setEnabled(false);
+        ui->spinSNREnd->setEnabled(false);
+        ui->spinSNRStep->setEnabled(false);
+        ui->btnSweep->setEnabled(false);
+    }
+    else if (modeText == "USRP")
+    {
+        ui->spinSNR->setEnabled(false);
+        ui->spinFcGHz->setEnabled(true);
+
+        ui->spinSNRStart->setEnabled(false);
+        ui->spinSNREnd->setEnabled(false);
+        ui->spinSNRStep->setEnabled(false);
+        ui->btnSweep->setEnabled(false);
+    }
+
+    ui->editInputFile->setEnabled(fileMode);
+    ui->editOutputFile->setEnabled(fileMode);
+    ui->btnBrowseInput->setEnabled(fileMode);
+    ui->btnBrowseOutput->setEnabled(fileMode);
+    ui->btnOpenOutput->setEnabled(fileMode && !lastSavedFilePath.isEmpty());
 }
 
 void MainWindow::initBerChart()
@@ -205,44 +271,62 @@ void MainWindow::plotBerCurve(const SweepResult& sr)
     series->attachAxis(axisY);
 }
 
-void MainWindow::on_comboMode_currentTextChanged(const QString &text)
+void MainWindow::on_comboMode_currentTextChanged(const QString &)
 {
-    if (text == "AWGN")
-    {
-        ui->spinSNR->setEnabled(true);
-        ui->spinFcGHz->setEnabled(false);
+    updateUiState();
+}
 
-        ui->spinSNRStart->setEnabled(true);
-        ui->spinSNREnd->setEnabled(true);
-        ui->spinSNRStep->setEnabled(true);
-        ui->btnSweep->setEnabled(true);
-    }
-    else if (text == "LOOPBACK")
-    {
-        ui->spinSNR->setEnabled(false);
-        ui->spinFcGHz->setEnabled(false);
+void MainWindow::on_checkFileTransfer_toggled(bool)
+{
+    updateUiState();
+}
 
-        ui->spinSNRStart->setEnabled(false);
-        ui->spinSNREnd->setEnabled(false);
-        ui->spinSNRStep->setEnabled(false);
-        ui->btnSweep->setEnabled(false);
-    }
-    else if (text == "USRP")
-    {
-        ui->spinSNR->setEnabled(false);
-        ui->spinFcGHz->setEnabled(true);
+void MainWindow::on_btnBrowseInput_clicked()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        "Select Input File"
+        );
 
-        ui->spinSNRStart->setEnabled(false);
-        ui->spinSNREnd->setEnabled(false);
-        ui->spinSNRStep->setEnabled(false);
-        ui->btnSweep->setEnabled(false);
+    if (path.isEmpty()) return;
+
+    ui->editInputFile->setText(path);
+
+    if (ui->editOutputFile->text().trimmed().isEmpty()) {
+        QFileInfo fi(path);
+        QString outPath = fi.absolutePath() + "/recovered_" + fi.fileName();
+        ui->editOutputFile->setText(outPath);
     }
+}
+
+void MainWindow::on_btnBrowseOutput_clicked()
+{
+    const QString path = QFileDialog::getSaveFileName(
+        this,
+        "Select Output File Path"
+        );
+
+    if (path.isEmpty()) return;
+
+    ui->editOutputFile->setText(path);
+}
+
+void MainWindow::on_btnOpenOutput_clicked()
+{
+    if (lastSavedFilePath.isEmpty()) {
+        QMessageBox::information(this, "Info", "No recovered output file yet.");
+        return;
+    }
+
+    QDesktopServices::openUrl(QUrl::fromLocalFile(lastSavedFilePath));
 }
 
 void MainWindow::on_btnRun_clicked()
 {
     ui->btnRun->setEnabled(false);
     ui->btnSweep->setEnabled(false);
+    ui->btnOpenOutput->setEnabled(false);
+    lastSavedFilePath.clear();
 
     QString modText = ui->comboMod->currentText();
     QString modeText = ui->comboMode->currentText();
@@ -252,44 +336,109 @@ void MainWindow::on_btnRun_clicked()
     double fcGHz = ui->spinFcGHz->value();
     double fcHz = fcGHz * 1e9;
 
-    ui->labelBER->setText(QString("Running... (%1 frames)").arg(frames));
-
     ModulationType mod = parse_modulation(modText.toStdString());
     RunMode mode = parse_mode(modeText.toStdString());
 
-    QFuture<TestResult> future = QtConcurrent::run([=]() {
-        return run_one_test(
-            mode,
-            static_cast<double>(snr),
-            frames,
-            fcHz,
-            mod
-            );
-    });
+    if (isFileTransferMode())
+    {
+        const QString inputPath = ui->editInputFile->text().trimmed();
+        const QString outputPath = ui->editOutputFile->text().trimmed();
 
-    watcher.setFuture(future);
+        if (inputPath.isEmpty()) {
+            QMessageBox::warning(this, "Warning", "Please select an input file.");
+            updateUiState();
+            ui->btnRun->setEnabled(true);
+            return;
+        }
+
+        if (outputPath.isEmpty()) {
+            QMessageBox::warning(this, "Warning", "Please select an output file path.");
+            updateUiState();
+            ui->btnRun->setEnabled(true);
+            return;
+        }
+
+        ui->labelBER->setText("Running file transfer...");
+
+        QFuture<TestResult> future = QtConcurrent::run([=]() {
+            return run_file_transfer_test(
+                mode,
+                static_cast<double>(snr),
+                fcHz,
+                mod,
+                inputPath.toStdString(),
+                outputPath.toStdString()
+                );
+        });
+
+        watcher.setFuture(future);
+    }
+    else
+    {
+        ui->labelBER->setText(QString("Running... (%1 frames)").arg(frames));
+
+        QFuture<TestResult> future = QtConcurrent::run([=]() {
+            return run_one_test(
+                mode,
+                static_cast<double>(snr),
+                frames,
+                fcHz,
+                mod
+                );
+        });
+
+        watcher.setFuture(future);
+    }
 }
 
 void MainWindow::onSimulationFinished()
 {
-    TestResult tr = watcher.result();
+    try
+    {
+        TestResult tr = watcher.result();
 
-    ui->labelBER->setText(
-        QString("BER = %1").arg(tr.total_ber, 0, 'e', 4)
-        );
+        ui->labelBER->setText(
+            QString("BER = %1").arg(tr.total_ber, 0, 'e', 4)
+            );
 
-    if (ui->textLog) {
-        ui->textLog->setPlainText(QString::fromStdString(tr.log_text));
+        if (ui->textLog) {
+            ui->textLog->setPlainText(QString::fromStdString(tr.log_text));
+        }
+
+        if (isFileTransferMode())
+        {
+            if (tr.file_saved) {
+                lastSavedFilePath = QString::fromStdString(tr.saved_file_path);
+                ui->btnOpenOutput->setEnabled(true);
+                ui->labelBER->setText(
+                    QString("BER = %1, file recovered")
+                        .arg(tr.total_ber, 0, 'e', 4)
+                    );
+            } else {
+                lastSavedFilePath.clear();
+                ui->btnOpenOutput->setEnabled(false);
+                ui->labelBER->setText(
+                    QString("BER = %1, file recovery failed")
+                        .arg(tr.total_ber, 0, 'e', 4)
+                    );
+            }
+        }
+        else if (ui->comboMode->currentText() == "AWGN")
+        {
+            plotSingleBerPoint(ui->spinSNR->value(), tr.total_ber);
+        }
     }
-
-    if (ui->comboMode->currentText() == "AWGN") {
-        plotSingleBerPoint(ui->spinSNR->value(), tr.total_ber);
+    catch (const std::exception& e)
+    {
+        ui->labelBER->setText("Run failed");
+        if (ui->textLog) {
+            ui->textLog->setPlainText(QString("Error: %1").arg(e.what()));
+        }
+        QMessageBox::critical(this, "Error", e.what());
     }
 
     ui->btnRun->setEnabled(true);
-    if (ui->comboMode->currentText() == "AWGN") {
-        ui->btnSweep->setEnabled(true);
-    }
+    updateUiState();
 }
 
 void MainWindow::on_btnSweep_clicked()
@@ -297,6 +446,11 @@ void MainWindow::on_btnSweep_clicked()
     QString modeText = ui->comboMode->currentText();
     if (modeText != "AWGN") {
         ui->labelBER->setText("Sweep only supports AWGN");
+        return;
+    }
+
+    if (isFileTransferMode()) {
+        ui->labelBER->setText("Sweep is disabled in file transfer mode");
         return;
     }
 
@@ -330,33 +484,42 @@ void MainWindow::on_btnSweep_clicked()
 
 void MainWindow::onSweepFinished()
 {
-    SweepResult sr = sweepWatcher.result();
+    try
+    {
+        SweepResult sr = sweepWatcher.result();
 
-    QString text;
-    for (const auto& pt : sr.points) {
-        text += QString("SNR = %1 dB, BER = %2, decoded = %3\n")
-        .arg(pt.snr_db, 0, 'f', 2)
-            .arg(pt.ber, 0, 'e', 4)
-            .arg((qulonglong)pt.decoded_frames);
+        QString text;
+        for (const auto& pt : sr.points) {
+            text += QString("SNR = %1 dB, BER = %2, decoded = %3\n")
+            .arg(pt.snr_db, 0, 'f', 2)
+                .arg(pt.ber, 0, 'e', 4)
+                .arg((qulonglong)pt.decoded_frames);
+        }
+
+        if (ui->textLog) {
+            ui->textLog->setPlainText(text);
+        }
+
+        plotBerCurve(sr);
+
+        if (!sr.points.empty()) {
+            ui->labelBER->setText(
+                QString("Last BER = %1")
+                    .arg(sr.points.back().ber, 0, 'e', 4)
+                );
+        } else {
+            ui->labelBER->setText("Sweep finished");
+        }
     }
-
-    if (ui->textLog) {
-        ui->textLog->setPlainText(text);
-    }
-
-    plotBerCurve(sr);
-
-    if (!sr.points.empty()) {
-        ui->labelBER->setText(
-            QString("Last BER = %1")
-                .arg(sr.points.back().ber, 0, 'e', 4)
-            );
-    } else {
-        ui->labelBER->setText("Sweep finished");
+    catch (const std::exception& e)
+    {
+        ui->labelBER->setText("Sweep failed");
+        if (ui->textLog) {
+            ui->textLog->setPlainText(QString("Error: %1").arg(e.what()));
+        }
+        QMessageBox::critical(this, "Error", e.what());
     }
 
     ui->btnRun->setEnabled(true);
-    if (ui->comboMode->currentText() == "AWGN") {
-        ui->btnSweep->setEnabled(true);
-    }
+    updateUiState();
 }
