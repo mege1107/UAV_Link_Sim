@@ -51,6 +51,9 @@
     <ClInclude Include="radio_if.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="sim_runner.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="utils.cpp">
@@ -93,6 +96,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="radio_usrp.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="sim_runner.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

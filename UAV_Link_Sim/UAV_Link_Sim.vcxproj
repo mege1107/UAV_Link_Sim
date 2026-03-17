@@ -133,6 +133,7 @@
     <ClInclude Include="modulation.h" />
     <ClInclude Include="radio_if.h" />
     <ClInclude Include="receiver.h" />
+    <ClInclude Include="sim_runner.h" />
     <ClInclude Include="spread_spectrum.h" />
     <ClInclude Include="sync.h" />
     <ClInclude Include="transmitter.h" />
@@ -149,6 +150,7 @@
     <ClCompile Include="radio_loopback.cpp" />
     <ClCompile Include="radio_usrp.cpp" />
     <ClCompile Include="receiver.cpp" />
+    <ClCompile Include="sim_runner.cpp" />
     <ClCompile Include="spread_spectrum.cpp" />
     <ClCompile Include="sync.cpp" />
     <ClCompile Include="transmitter.cpp" />

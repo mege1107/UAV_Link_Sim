@@ -418,7 +418,7 @@ VecInt Receiver::demodulateTelemetry(const VecComplex& rx)
         return demodulateMSK(rx);
 
     default:
-        std::cerr << "[Receiver] 当前接收机未实现该调制方式\n";
+        std::cerr << "[Receiver] Modulation scheme not implemented in current receiver\n";
         return {};
     }
 }
@@ -490,7 +490,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         << "\n";
 
     if (rx_signal.size() < (size_t)single_frame_total_samp) {
-        std::cerr << "[Receiver] 信号长度不足一帧，无法解调\n";
+        std::cerr << "[Receiver] Signal length insufficient for one frame, cannot demodulate\n";
         return {};
     }
 
@@ -530,7 +530,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             }
 
             if (!found_candidate) {
-                std::cout << "[Receiver] 首帧未找到超过阈值的同步候选，解调结束\n";
+                std::cout << "[Receiver] No sync candidate above threshold found for first frame, demodulation ended\n";
                 break;
             }
 
@@ -541,7 +541,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             int best_rel = 0;
             double best_m = 0.0;
             if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                std::cout << "[Receiver] 首帧候选附近精搜索失败，解调结束\n";
+                std::cout << "[Receiver] Fine search near first frame candidate failed, demodulation ended\n";
                 break;
             }
 
@@ -550,7 +550,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             ok = (sync_metric >= first_sync_threshold);
 
             if (!ok) {
-                std::cout << "[Receiver] 首帧同步峰值过低(" << sync_metric << ")，解调结束\n";
+                std::cout << "[Receiver] First frame sync peak too low (" << sync_metric << "), demodulation ended\n";
                 break;
             }
 
@@ -573,7 +573,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
                 int best_rel = 0;
                 double best_m = 0.0;
                 if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                    std::cout << "[Receiver] 未检测到有效同步头，解调结束\n";
+                    std::cout << "[Receiver] No valid sync header detected, demodulation ended\n";
                     break;
                 }
 
@@ -583,14 +583,14 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             }
 
             if (!ok) {
-                std::cout << "[Receiver] 同步峰值过低(" << sync_metric << ")，解调结束\n";
+                std::cout << "[Receiver] Sync peak too low (" << sync_metric << "), demodulation ended\n";
                 break;
             }
         }
 
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
         if (frame_abs_end > total_rx_len) {
-            std::cout << "[Receiver] 剩余采样不足完整一帧，解调结束\n";
+            std::cout << "[Receiver] Remaining samples insufficient for a full frame, demodulation ended\n";
             break;
         }
 
@@ -655,7 +655,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         const size_t payload_start = (size_t)sync_len;
         const size_t payload_end = payload_start + (size_t)payload_samp_num;
         if (payload_end > current_frame.size()) {
-            std::cout << "[Receiver] payload 越界，解调结束\n";
+            std::cout << "[Receiver] Payload out of bounds, demodulation ended\n";
             break;
         }
 
@@ -708,7 +708,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         // ====== 解调 ======
         VecInt rx_chips_or_syms = demodulateTelemetry(payload_sig);
         if (rx_chips_or_syms.empty()) {
-            std::cout << "[Receiver] 解调输出为空，解调结束\n";
+            std::cout << "[Receiver] Demodulation output is empty, demodulation ended\n";
             break;
         }
 
@@ -721,15 +721,15 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         if ((int)rx_chips_or_syms.size() < ccsk_chip_num) {
-            std::cout << "[Receiver] 解调后 chip 数不足，得到 "
+            std::cout << "[Receiver] Insufficient chips after demodulation, got "
                 << rx_chips_or_syms.size()
-                << "，期望 " << ccsk_chip_num << "\n";
+                << ", expected " << ccsk_chip_num << "\n";
             break;
         }
 
         VecInt rx_encoded_bits = despreadCCSK(rx_chips_or_syms);
         if (rx_encoded_bits.empty()) {
-            std::cout << "[Receiver] 解扩失败，解调结束\n";
+            std::cout << "[Receiver] Despreading failed, demodulation ended\n";
             break;
         }
 
@@ -738,9 +738,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         if ((int)rx_encoded_bits.size() < encoded_bits) {
-            std::cout << "[Receiver] 解扩后编码比特数不足，得到 "
+            std::cout << "[Receiver] Insufficient coded bits after despreading, got "
                 << rx_encoded_bits.size()
-                << "，期望 " << encoded_bits << "\n";
+                << ", expected " << encoded_bits << "\n";
             break;
         }
 
@@ -748,16 +748,16 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         VecInt rx_source_bits = HXL_RSDecode(rx_encoded_bits, 31, 15);
         if (rx_source_bits.empty()) {
-            std::cout << "[Receiver] RS 解码失败，解调结束\n";
+            std::cout << "[Receiver] RS decoding failed, demodulation ended\n";
             break;
         }
 
         total_rx_bits.insert(total_rx_bits.end(), rx_source_bits.begin(), rx_source_bits.end());
 
-        std::cout << "[Receiver] 第" << frame_count_
-            << "帧解调完成，同步峰值：" << sync_metric
-            << "，频偏估计：" << f_hat << "Hz"
-            << "，解调比特数：" << rx_source_bits.size()
+        std::cout << "[Receiver] Frame " << frame_count_
+            << " demodulated, sync peak: " << sync_metric
+            << ", CFO estimate: " << f_hat << "Hz"
+            << ", demodulated bits: " << rx_source_bits.size()
             << "\n";
 
         current_offset = frame_abs_end;
@@ -938,7 +938,7 @@ VecInt Receiver::demodulateOOK(const VecComplex& rx)
 
     // 退化保护：如果这一帧高低两簇分离很差，就退回均值门限
     if (!std::isfinite(th) || (p90 - p10) < 1e-8) {
-        th = std::accumulate(sym_amp.begin(), sym_amp.end(), 0.0) / (double)sym_amp.size();
+        th = std::accumulate(sorted_amp.begin(), sorted_amp.end(), 0.0) / (double)sorted_amp.size();
     }
 
     std::cout << "[DBG][OOK] p10=" << p10
