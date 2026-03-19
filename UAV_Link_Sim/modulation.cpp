@@ -63,23 +63,29 @@ VecDouble firFilterSameLength(const VecDouble& b, const VecDouble& x)
 
 } // namespace
 
-// MSK调制 (简化版，对应MATLAB mskmod)
-VecComplex mskmod(const VecInt& bits, int samp) {
+// 真正的 MSK 调制
+// MSK = h=0.5 的连续相位 2FSK
+// 每个 bit 对应频偏符号 a_k ∈ {+1,-1}
+// 每个 symbol 内总相位变化为 ±pi/2
+VecComplex mskmod(const VecInt& bits, int samp)
+{
     VecComplex tx;
-    double phase = 0;
-    double T = 1.0;
-    double Ts = T / samp;
+    if (bits.empty() || samp <= 0) return tx;
 
-    for (size_t i = 0; i < bits.size(); ++i) {
-        double b = bits[i] ? 1.0 : -1.0;
-        for (int j = 0; j < samp; ++j) {
-            double t = j * Ts;
-            double I = b * std::cos(PI * t / (2 * T)) * std::cos(phase);
-            double Q = b * std::sin(PI * t / (2 * T)) * std::sin(phase);
-            tx.emplace_back(I, Q);
+    tx.reserve(bits.size() * (size_t)samp);
+
+    double phase = 0.0;
+    const double dphi_unit = PI / (2.0 * (double)samp); // 每采样点相位增量单位
+
+    for (int bit : bits) {
+        const double a = bit ? 1.0 : -1.0;
+
+        for (int n = 0; n < samp; ++n) {
+            phase += a * dphi_unit;
+            tx.emplace_back(std::cos(phase), std::sin(phase));
         }
-        phase += bits[i] ? PI / 2 : -PI / 2;
     }
+
     return tx;
 }
 
@@ -139,19 +145,28 @@ VecComplex ookmod(const VecInt& bits, int samp) {
     return res;
 }
 
-// FSK调制
-VecComplex fskmod(const VecInt& bits, int M, double deta_f, int samp, double fs) {
+// 连续相位 2FSK 调制
+VecComplex fskmod(const VecInt& bits, int M, double deta_f, int samp, double fs)
+{
     (void)M;
-    VecComplex tx;
-    const double Ts = 1.0 / fs;
 
-    for (int b : bits) {
-        const double f = b ? deta_f : -deta_f;
-        for (int j = 0; j < samp; ++j) {
-            const double t = j * Ts;
-            tx.emplace_back(std::cos(2 * PI * f * t), std::sin(2 * PI * f * t));
+    VecComplex tx;
+    if (bits.empty() || samp <= 0 || fs <= 0.0) return tx;
+
+    tx.reserve(bits.size() * (size_t)samp);
+
+    double phase = 0.0;
+    const double dphi = 2.0 * PI * deta_f / fs; // 每采样点的相位增量幅值
+
+    for (int bit : bits) {
+        const double sign = bit ? 1.0 : -1.0;
+
+        for (int n = 0; n < samp; ++n) {
+            phase += sign * dphi;
+            tx.emplace_back(std::cos(phase), std::sin(phase));
         }
     }
+
     return tx;
 }
 

@@ -961,25 +961,26 @@ VecInt Receiver::demodulateFSK(const VecComplex& rx)
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
-    const double deta_f = 1e6;
-    const double fs = config_.fs;
+    if (rx.size() < 2 || s <= 0) return bits;
 
-    if (!std::isfinite(fs) || fs <= 0.0) return {};
+    const size_t nsym = rx.size() / (size_t)s;
+    bits.reserve(nsym);
 
-    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
-        Complex corr_pos(0.0, 0.0);
-        Complex corr_neg(0.0, 0.0);
+    for (size_t k = 0; k < nsym; ++k) {
+        const size_t base = k * (size_t)s;
 
+        double acc_phase = 0.0;
+
+        // 对连续相位 FSK，符号内的平均瞬时相位增量符号可直接判 bit
         for (int j = 0; j < s; ++j) {
-            double t = (double)j / fs;
-            Complex c_pos(std::cos(2 * PI * deta_f * t), std::sin(2 * PI * deta_f * t));
-            Complex c_neg(std::cos(-2 * PI * deta_f * t), std::sin(-2 * PI * deta_f * t));
+            const size_t n = base + (size_t)j;
+            if (n == 0 || n >= rx.size()) continue;
 
-            corr_pos += rx[base + (size_t)j] * std::conj(c_pos);
-            corr_neg += rx[base + (size_t)j] * std::conj(c_neg);
+            Complex z = std::conj(rx[n - 1]) * rx[n];
+            acc_phase += std::atan2(z.imag(), z.real());
         }
 
-        bits.push_back(std::norm(corr_pos) >= std::norm(corr_neg) ? 1 : 0);
+        bits.push_back(acc_phase >= 0.0 ? 1 : 0);
     }
 
     return bits;
@@ -1017,35 +1018,8 @@ VecInt Receiver::demodulateMSK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
-    if (rx.size() < (size_t)s) return {};
 
-    const double phase_table[4] = { 0.0, PI / 2.0, PI, 3.0 * PI / 2.0 };
-
-    auto build_template = [&](int state_idx, int bit_val) -> VecComplex {
-        VecComplex tmpl;
-        tmpl.reserve((size_t)s);
-
-        double phase = phase_table[state_idx];
-        double T = 1.0;
-        double Ts = T / s;
-        double b = bit_val ? 1.0 : -1.0;
-
-        for (int j = 0; j < s; ++j) {
-            double t = j * Ts;
-            double I = b * std::cos(PI * t / (2.0 * T)) * std::cos(phase);
-            double Q = b * std::sin(PI * t / (2.0 * T)) * std::sin(phase);
-            tmpl.emplace_back(I, Q);
-        }
-        return tmpl;
-        };
-
-    VecComplex tmpl[4][2];
-    for (int st = 0; st < 4; ++st) {
-        tmpl[st][0] = build_template(st, 0);
-        tmpl[st][1] = build_template(st, 1);
-    }
-
-    int state = 0;
+    if (rx.size() < 2 || s <= 0) return bits;
 
     const size_t nsym = rx.size() / (size_t)s;
     bits.reserve(nsym);
@@ -1053,29 +1027,19 @@ VecInt Receiver::demodulateMSK(const VecComplex& rx)
     for (size_t k = 0; k < nsym; ++k) {
         const size_t base = k * (size_t)s;
 
-        double best_err = 1e300;
-        int best_bit = 0;
+        double acc_phase = 0.0;
 
-        for (int bit = 0; bit <= 1; ++bit) {
-            double err = 0.0;
+        // MSK 本质上是 h=0.5 的 CPFSK
+        // 一个 symbol 内总相位变化应接近 ±pi/2
+        for (int j = 0; j < s; ++j) {
+            const size_t n = base + (size_t)j;
+            if (n == 0 || n >= rx.size()) continue;
 
-            for (int j = 0; j < s; ++j) {
-                Complex d = rx[base + (size_t)j] - tmpl[state][bit][(size_t)j];
-                err += std::norm(d);
-            }
-
-            if (err < best_err) {
-                best_err = err;
-                best_bit = bit;
-            }
+            Complex z = std::conj(rx[n - 1]) * rx[n];
+            acc_phase += std::atan2(z.imag(), z.real());
         }
 
-        bits.push_back(best_bit);
-
-        if (best_bit == 1)
-            state = (state + 1) & 3;
-        else
-            state = (state + 3) & 3;
+        bits.push_back(acc_phase >= 0.0 ? 1 : 0);
     }
 
     return bits;
