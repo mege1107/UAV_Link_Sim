@@ -5,19 +5,20 @@ int main()
 {
     try
     {
-        TestResult tr = run_file_transfer_test(
-            RunMode::AWGN,                // 先测 LOOPBACK
-            19.0,                            // LOOPBACK 这里无所谓
-            2.45e9,                           // 中心频率，LOOPBACK 下基本无所谓
-            ModulationType::QAM,             // 先用最稳的 BPSK
-            "D:/linksim/test_files/kun.mp4", // 输入文件
-            "D:/linksim/test_files/outkun.mp4"   // 输出文件
+        TestResult tr = run_one_test(
+            RunMode::AWGN,          // AWGN 信道
+            -3.0,                   // SNR（你可以改，比如 -10 ~ 10）
+            100,                    // 重复帧数（越大越准，建议 >=100）
+            2.45e9,                 // 中心频率（AWGN下无影响）
+            ModulationType::BPSK     // 调制方式（你现在重点测这个）
         );
 
-        std::cout << "========== FILE TRANSFER RESULT ==========\n";
+        std::cout << "========== BER TEST ==========\n";
         std::cout << tr.log_text << std::endl;
-        std::cout << "file_saved = " << (tr.file_saved ? "true" : "false") << std::endl;
-        std::cout << "saved_file_path = " << tr.saved_file_path << std::endl;
+
+        std::cout << "Total bits = " << tr.total_compared_bits << std::endl;
+        std::cout << "Bit errors = " << tr.total_bit_errors << std::endl;
+        std::cout << "BER = " << tr.total_ber << std::endl;
     }
     catch (const std::exception& e)
     {

@@ -503,7 +503,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const size_t W = (size_t)(2 * s);
 
     // 首帧专用：全局找“最早有效峰”
-    const double first_sync_threshold = 0.4;   // 可按实际改成 0.35~0.50
+    const double first_sync_threshold = 0.2;   // 可按实际改成 0.35~0.50
     const size_t first_refine_W = (size_t)(2 * s);
 
     bool acquired = false;
@@ -1089,7 +1089,7 @@ VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_ga
     VecComplex out = payload_with_gap;
     if (out.empty() || total_pulses <= 0 || pulse_len <= 0) return out;
 
-    VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, 1);
+    VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, config_.hop_pattern);
 
     const double fs = config_.fs;
     if (!std::isfinite(fs) || fs <= 0.0) return out;

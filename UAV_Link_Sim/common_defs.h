@@ -52,6 +52,7 @@ struct TransmitterConfig {
     bool enable_cfo = true;                          // 是否启用接收端 CFO 估计与补偿
     bool connect = false;                            // 是否连接 USRP
     double Rb = 50e3;                                // 信息速率 (4K~200K)
+    int hop_pattern = 1;
     FunctionType function = FunctionType::RemoteControl;
     ModulationType modulation = ModulationType::FM;
 

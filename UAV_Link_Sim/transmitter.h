@@ -29,7 +29,7 @@ public:
     }
 
     VecInt getLastSourceBits() const { return last_source_bits_; }
-
+    const VecComplex& getLastPureModulatedSignal() const { return last_pure_modulated_signal_; }
 private:
     TransmitterConfig config_;
 
@@ -58,6 +58,6 @@ private:
         int gap_len,
         int total_pulses
     );
-
+    VecComplex last_pure_modulated_signal_;
     VecInt last_source_bits_;
 };

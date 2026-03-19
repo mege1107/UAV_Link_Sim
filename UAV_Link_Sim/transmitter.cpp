@@ -281,6 +281,7 @@ VecComplex Transmitter::buildRemoteControlPulse(
 }
 
 VecComplex Transmitter::generateTransmitSignal() {
+    last_pure_modulated_signal_.clear();
     // 1. 信源
     if (config_.source_mode == SourceMode::FileBits) {
         last_source_bits_ = generateFileSourceBits();
@@ -338,12 +339,16 @@ VecComplex Transmitter::generateTransmitSignal() {
 
         txSig = mskmod(tx_bits_mat, config_.samp);
 
+        // 保存“纯 MSK 调制输出”
+        last_pure_modulated_signal_ = txSig;
+
         const int total_pulses = static_cast<int>(ccsk_msg.size() / 32);
-        VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, 1);
+        VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, config_.hop_pattern);
 
         txSig = frequencyHop(txSig, frq_seq, pulse_len, nt, config_.fs);
 
         txSig = buildRemoteControlPulse(txSig, pulse_len, gap_len, total_pulses);
+        last_pure_modulated_signal_ = txSig;
     }
     else {
         // =========================
@@ -377,6 +382,9 @@ VecComplex Transmitter::generateTransmitSignal() {
         else if (config_.modulation == ModulationType::MSK) {
             txSig = mskmod(ccsk_msg, config_.samp);
         }
+
+        // 保存“纯调制输出”
+        last_pure_modulated_signal_ = txSig;
     }
 
     // 6. 添加同步头

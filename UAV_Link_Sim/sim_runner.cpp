@@ -6,6 +6,8 @@
 #include <ctime>
 #include <stdexcept>
 #include <fstream>
+#include <sstream>
+#include <cmath>
 
 #include "transmitter.h"
 #include "receiver.h"
@@ -15,6 +17,8 @@
 #ifdef WITH_UHD
 #include "usrp_driver.h"
 #endif
+
+static constexpr bool SHOW_PURE_MSK_ONLY = true;
 
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
@@ -53,7 +57,7 @@ static std::vector<unsigned char> bits_to_bytes(const VecInt& bits)
         for (size_t j = 0; j < 8; ++j)
         {
             const int raw = bits[i * 8 + j];
-            const int bit = raw & 1;   // 只取最低位，而不是用真假判断
+            const int bit = raw & 1;
             b |= static_cast<unsigned char>(bit << (7 - j));
         }
 
@@ -92,15 +96,12 @@ static bool recover_file_from_bits(
     std::cout << "[FILE][RX] total bits = " << rx_bits.size() << "\n";
     std::cout << "[FILE][RX] total bytes = " << bytes.size() << "\n";
 
-    // 打印前 32 个字节，方便查头
     std::cout << "[FILE][RX] first bytes = ";
     for (size_t i = 0; i < std::min<size_t>(32, bytes.size()); ++i) {
         std::cout << (int)bytes[i] << " ";
     }
     std::cout << "\n";
 
-    // 最小头长度：
-    // 4B magic + 1B version + 1B file_type + 2B filename_len + 8B file_size = 16B
     if (bytes.size() < 16) {
         std::cout << "[FILE][RX] FAIL: bytes.size() < 16\n";
         return false;
@@ -224,15 +225,224 @@ RunMode parse_mode(const std::string& s)
     throw std::runtime_error("Unknown mode");
 }
 
-// =========================
-// 原有随机 bit 测试：保留
-// =========================
+static std::vector<std::complex<double>> compute_dft(
+    const std::vector<std::complex<double>>& x)
+{
+    const size_t N = x.size();
+    std::vector<std::complex<double>> X(N);
+
+    for (size_t k = 0; k < N; ++k) {
+        std::complex<double> sum = 0.0;
+        for (size_t n = 0; n < N; ++n) {
+            double angle = -2.0 * M_PI * static_cast<double>(k) * static_cast<double>(n) / static_cast<double>(N);
+            sum += x[n] * std::complex<double>(std::cos(angle), std::sin(angle));
+        }
+        X[k] = sum;
+    }
+    return X;
+}
+
+static size_t get_center_start(size_t total_len, size_t want_len)
+{
+    if (want_len >= total_len) {
+        return 0;
+    }
+    return (total_len - want_len) / 2;
+}
+
+static VecComplex extract_center_segment(const VecComplex& sig, size_t want_len)
+{
+    if (sig.empty()) {
+        return {};
+    }
+
+    const size_t takeN = std::min(want_len, sig.size());
+    const size_t start = get_center_start(sig.size(), takeN);
+
+    return VecComplex(sig.begin() + static_cast<long long>(start),
+        sig.begin() + static_cast<long long>(start + takeN));
+}
+
+static void build_waveform_from_signal(
+    const VecComplex& sig_mid,
+    ModulationType modulation,
+    std::vector<double>& out_waveform,
+    WaveformType& out_type)
+{
+    out_waveform.clear();
+
+    if (sig_mid.empty()) {
+        out_type = WaveformType::REAL;
+        return;
+    }
+
+    bool useEnvelope = (modulation == ModulationType::FM);
+    out_type = useEnvelope ? WaveformType::ENVELOPE : WaveformType::REAL;
+
+    out_waveform.reserve(sig_mid.size());
+
+    if (useEnvelope)
+    {
+        std::vector<double> env;
+        env.reserve(sig_mid.size());
+
+        for (size_t i = 0; i < sig_mid.size(); ++i) {
+            env.push_back(std::abs(sig_mid[i]));
+        }
+
+        const size_t win = 64;
+
+        for (size_t i = 0; i < env.size(); ++i) {
+            const size_t l = (i > win / 2) ? (i - win / 2) : 0;
+            const size_t r = std::min(env.size(), i + win / 2 + 1);
+
+            double sum = 0.0;
+            for (size_t k = l; k < r; ++k) {
+                sum += env[k];
+            }
+
+            out_waveform.push_back(sum / static_cast<double>(r - l));
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < sig_mid.size(); ++i) {
+            out_waveform.push_back(sig_mid[i].real());
+        }
+    }
+}
+
+static void build_spectrum_from_signal(
+    const VecComplex& sig_mid,
+    double fs,
+    std::vector<double>& out_freq,
+    std::vector<double>& out_mag)
+{
+    out_freq.clear();
+    out_mag.clear();
+
+    if (sig_mid.empty() || fs <= 0.0) {
+        return;
+    }
+
+    const size_t N = sig_mid.size();
+
+    std::vector<std::complex<double>> x(N);
+
+    for (size_t n = 0; n < N; ++n) {
+        double w = 0.5 - 0.5 * std::cos(2.0 * M_PI * n / (N - 1));
+        x[n] = sig_mid[n] * w;
+    }
+
+    std::vector<std::complex<double>> X(N);
+
+    for (size_t k = 0; k < N; ++k) {
+        std::complex<double> sum = 0.0;
+        for (size_t n = 0; n < N; ++n) {
+            double angle = -2.0 * M_PI * k * n / N;
+            sum += x[n] * std::complex<double>(std::cos(angle), std::sin(angle));
+        }
+        X[k] = sum;
+    }
+
+    out_freq.reserve(N);
+    out_mag.reserve(N);
+
+    for (size_t k = 0; k < N; ++k) {
+        size_t idx = (k + N / 2) % N;
+        double f = (static_cast<double>(k) - static_cast<double>(N) / 2.0)
+            * fs / static_cast<double>(N);
+
+        double mag = std::abs(X[idx]) / static_cast<double>(N);
+        double mag_db = 20.0 * std::log10(mag + 1e-12);
+
+        out_freq.push_back(f);
+        out_mag.push_back(mag_db);
+    }
+}
+
+static void build_spectrogram(
+    const VecComplex& sig_mid,
+    double fs,
+    TestResult& tr)
+{
+    tr.spectrogram_data.clear();
+    tr.spectrogram_width = 0;
+    tr.spectrogram_height = 0;
+    tr.spectrogram_time_span = 0.0;
+    tr.spectrogram_freq_min = -fs / 2.0;
+    tr.spectrogram_freq_max = fs / 2.0;
+
+    if (sig_mid.empty() || fs <= 0.0) {
+        return;
+    }
+
+    const int fftSize = 256;
+    const int hopSize = 64;
+    const int windowSize = 256;
+
+    if (sig_mid.size() < static_cast<size_t>(windowSize)) {
+        return;
+    }
+
+    const int frameCount =
+        1 + static_cast<int>((sig_mid.size() - static_cast<size_t>(windowSize)) / static_cast<size_t>(hopSize));
+    const int freqBins = fftSize;
+
+    tr.spectrogram_width = frameCount;
+    tr.spectrogram_height = freqBins;
+    tr.spectrogram_time_span = static_cast<double>(sig_mid.size()) / fs;
+    tr.spectrogram_freq_min = -fs / 2.0;
+    tr.spectrogram_freq_max = fs / 2.0;
+    tr.spectrogram_data.assign(static_cast<size_t>(frameCount * freqBins), -120.0);
+
+    double globalMaxDb = -1e100;
+
+    for (int frame = 0; frame < frameCount; ++frame)
+    {
+        const int start = frame * hopSize;
+
+        std::vector<std::complex<double>> x(fftSize, 0.0);
+
+        for (int n = 0; n < windowSize; ++n) {
+            double w = 0.5 - 0.5 * std::cos(2.0 * M_PI * n / (windowSize - 1));
+            x[n] = sig_mid[static_cast<size_t>(start + n)] * w;
+        }
+
+        auto X = compute_dft(x);
+
+        for (int k = 0; k < freqBins; ++k)
+        {
+            const int idx = (k + fftSize / 2) % fftSize;
+            const double mag = std::abs(X[static_cast<size_t>(idx)]) / static_cast<double>(fftSize);
+            const double db = 20.0 * std::log10(mag + 1e-12);
+
+            tr.spectrogram_data[static_cast<size_t>(frame * freqBins + k)] = db;
+            if (db > globalMaxDb) {
+                globalMaxDb = db;
+            }
+        }
+    }
+
+    const double floorDb = globalMaxDb - 60.0;
+
+    for (double& v : tr.spectrogram_data) {
+        if (v < floorDb) v = floorDb;
+        if (v > globalMaxDb) v = globalMaxDb;
+
+        double norm = (v - floorDb) / (globalMaxDb - floorDb + 1e-12);
+        v = std::clamp(norm, 0.0, 1.0);
+    }
+}
+
 TestResult run_one_test(
     RunMode mode,
     double awgn_snr_db,
     int tx_repeat_frames,
     double center_freq_hz,
-    ModulationType modulation
+    ModulationType modulation,
+    double info_rate_bps,
+    int hop_pattern
 )
 {
     std::ostringstream log;
@@ -249,10 +459,10 @@ TestResult run_one_test(
     cfg.frame_bit = 75;
     cfg.samp = 8;
     cfg.zp_sym = 33;
-    cfg.Rb = 50000;
+    cfg.Rb = info_rate_bps;
+    cfg.hop_pattern = hop_pattern;
     cfg.connect = (mode == RunMode::USRP);
 
-    // 随机 bit 模式
     cfg.source_mode = SourceMode::RandomBits;
     cfg.input_file_path.clear();
     cfg.file_bits.clear();
@@ -270,11 +480,15 @@ TestResult run_one_test(
     log << "[MODE] " << mode_to_string(mode) << "\n";
     log << "[MOD] " << modulation_to_string(modulation) << "\n";
     log << "[SRC] RANDOM_BITS\n";
+    log << "[CENTER FREQ] " << center_freq_hz << " Hz\n";
+    log << "[INFO RATE] " << info_rate_bps << " bps\n";
+    log << "[HOP PATTERN] " << hop_pattern << "\n";
 
     VecComplex tx_burst;
 
-    for (int i = 0; i < tx_repeat_frames; ++i)
+    for (int i = 0; i < tx_repeat_frames; ++i) {
         tx_burst.insert(tx_burst.end(), one_frame_sig.begin(), one_frame_sig.end());
+    }
 
     VecComplex rx_sig;
 
@@ -286,10 +500,9 @@ TestResult run_one_test(
     {
         rx_sig = Channel::awgn(tx_burst, awgn_snr_db);
     }
-
-#ifdef WITH_UHD
     else if (mode == RunMode::USRP)
     {
+#ifdef WITH_UHD
         USRPDriver::Config uc;
 
         uc.device_args = "type=b200";
@@ -300,18 +513,26 @@ TestResult run_one_test(
         usrp.init();
 
         usrp.start_rx_worker(tx_burst.size());
-
         usrp.send_burst(tx_burst);
-
         usrp.wait_rx_worker();
         rx_sig = usrp.fetch_rx_buffer();
-    }
+#else
+        throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
 #endif
+    }
+    else
+    {
+        throw std::runtime_error("Unknown run mode.");
+    }
+
+    if (rx_sig.empty()) {
+        throw std::runtime_error("rx_sig is empty before receiver processing.");
+    }
 
     VecInt rx_bits = rx.receive(rx_sig);
 
     const size_t bits_per_frame = one_frame_bits.size();
-    const size_t decoded_frames = rx_bits.size() / bits_per_frame;
+    const size_t decoded_frames = bits_per_frame > 0 ? (rx_bits.size() / bits_per_frame) : 0;
 
     size_t total_compared_bits = 0;
     size_t total_bit_errors = 0;
@@ -324,7 +545,6 @@ TestResult run_one_test(
         );
 
         size_t frame_errors = 0;
-
         compute_ber(one_frame_bits, rx_frame, frame_errors);
 
         total_bit_errors += frame_errors;
@@ -338,25 +558,80 @@ TestResult run_one_test(
     tr.decoded_frames = decoded_frames;
     tr.total_ber =
         total_compared_bits ?
-        (double)total_bit_errors / (double)total_compared_bits :
+        static_cast<double>(total_bit_errors) / static_cast<double>(total_compared_bits) :
         0.0;
 
+    {
+        const VecComplex& tx_sig_full = tx.getLastPureModulatedSignal();
+
+        if (tx_sig_full.empty()) {
+            throw std::runtime_error("Pure modulated signal is empty");
+        }
+
+        const VecComplex tx_sig_wave_mid = extract_center_segment(tx_sig_full, 4000);
+        const VecComplex tx_sig_spec_mid = extract_center_segment(tx_sig_full, 1024);
+        const VecComplex tx_sig_tf_mid = extract_center_segment(tx_sig_full, 4096);
+
+        build_waveform_from_signal(
+            tx_sig_wave_mid,
+            modulation,
+            tr.waveform,
+            tr.waveform_type
+        );
+
+        build_spectrum_from_signal(
+            tx_sig_spec_mid,
+            cfg.fs,
+            tr.spectrum_freq,
+            tr.spectrum_mag
+        );
+
+        build_spectrogram(tx_sig_tf_mid, cfg.fs, tr);
+
+        log << "[TX MID SEGMENT] waveform = " << tx_sig_wave_mid.size()
+            << ", spectrum = " << tx_sig_spec_mid.size()
+            << ", spectrogram = " << tx_sig_tf_mid.size() << "\n";
+        log << "[SPECTROGRAM] width = " << tr.spectrogram_width
+            << ", height = " << tr.spectrogram_height << "\n";
+    }
+
+    {
+        const VecComplex rx_sig_wave_mid = extract_center_segment(rx_sig, 4000);
+        const VecComplex rx_sig_spec_mid = extract_center_segment(rx_sig, 1024);
+
+        build_waveform_from_signal(
+            rx_sig_wave_mid,
+            modulation,
+            tr.rx_waveform,
+            tr.rx_waveform_type
+        );
+
+        build_spectrum_from_signal(
+            rx_sig_spec_mid,
+            cfg.fs,
+            tr.rx_spectrum_freq,
+            tr.rx_spectrum_mag
+        );
+
+        log << "[RX MID SEGMENT] waveform = " << rx_sig_wave_mid.size()
+            << ", spectrum = " << rx_sig_spec_mid.size() << "\n";
+    }
+
+    log << "[RX BITS] " << rx_bits.size() << "\n";
+    log << "[DECODED FRAMES] " << decoded_frames << "\n";
     log << "BER = " << tr.total_ber << "\n";
 
     tr.log_text = log.str();
-
     return tr;
 }
 
-// =========================
-// 新增：文件传输测试
-// 连续多帧发送整个文件
-// =========================
 TestResult run_file_transfer_test(
     RunMode mode,
     double awgn_snr_db,
     double center_freq_hz,
     ModulationType modulation,
+    double info_rate_bps,
+    int hop_pattern,
     const std::string& input_file_path,
     const std::string& output_file_path
 )
@@ -383,10 +658,10 @@ TestResult run_file_transfer_test(
     cfg.frame_bit = 75;
     cfg.samp = 8;
     cfg.zp_sym = 33;
-    cfg.Rb = 50000;
+    cfg.Rb = info_rate_bps;
+    cfg.hop_pattern = hop_pattern;
     cfg.connect = (mode == RunMode::USRP);
 
-    // 文件模式
     cfg.source_mode = SourceMode::FileBits;
     cfg.input_file_path = input_file_path;
     cfg.file_bits.clear();
@@ -394,13 +669,11 @@ TestResult run_file_transfer_test(
 
     Transmitter tx(cfg);
 
-    // 第一帧先生成一次，让 tx 内部完成文件打包
     VecComplex first_frame_sig = tx.generateTransmitSignal();
     VecInt first_frame_bits = tx.getLastSourceBits();
 
     cfg.fs = tx.getFS();
 
-    // 注意：tx 内部 config_ 会维护自己的 file_bits 和 offset
     const TransmitterConfig& tx_cfg = tx.getConfig();
     const size_t total_file_bits = tx_cfg.file_bits.size();
     const size_t bits_per_frame = static_cast<size_t>(cfg.frame_bit * cfg.n);
@@ -414,6 +687,9 @@ TestResult run_file_transfer_test(
     log << "[MODE] " << mode_to_string(mode) << "\n";
     log << "[MOD] " << modulation_to_string(modulation) << "\n";
     log << "[SRC] FILE_BITS\n";
+    log << "[CENTER FREQ] " << center_freq_hz << " Hz\n";
+    log << "[INFO RATE] " << info_rate_bps << " bps\n";
+    log << "[HOP PATTERN] " << hop_pattern << "\n";
     log << "[INPUT FILE] " << input_file_path << "\n";
     log << "[OUTPUT FILE] " << output_file_path << "\n";
     log << "[PACKED FILE BITS] " << total_file_bits << "\n";
@@ -423,11 +699,9 @@ TestResult run_file_transfer_test(
     VecComplex tx_burst;
     VecInt tx_all_bits;
 
-    // 已经生成了第一帧
     tx_burst.insert(tx_burst.end(), first_frame_sig.begin(), first_frame_sig.end());
     tx_all_bits.insert(tx_all_bits.end(), first_frame_bits.begin(), first_frame_bits.end());
 
-    // 后续帧继续按文件偏移发送
     for (size_t i = 1; i < total_frames; ++i)
     {
         VecComplex frame_sig = tx.generateTransmitSignal();
@@ -447,10 +721,9 @@ TestResult run_file_transfer_test(
     {
         rx_sig = Channel::awgn(tx_burst, awgn_snr_db);
     }
-
-#ifdef WITH_UHD
     else if (mode == RunMode::USRP)
     {
+#ifdef WITH_UHD
         USRPDriver::Config uc;
 
         uc.device_args = "type=b200";
@@ -461,15 +734,24 @@ TestResult run_file_transfer_test(
         usrp.init();
 
         usrp.start_rx_worker(tx_burst.size());
-
         usrp.send_burst(tx_burst);
-
         usrp.wait_rx_worker();
         rx_sig = usrp.fetch_rx_buffer();
-    }
+#else
+        throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
 #endif
+    }
+    else
+    {
+        throw std::runtime_error("Unknown run mode.");
+    }
+
+    if (rx_sig.empty()) {
+        throw std::runtime_error("rx_sig is empty before receiver processing.");
+    }
 
     VecInt rx_bits = rx.receive(rx_sig);
+
     std::cout << "[DBG][TX bits first 80] ";
     for (size_t i = 0; i < std::min<size_t>(80, tx_all_bits.size()); ++i) {
         std::cout << tx_all_bits[i];
@@ -489,6 +771,7 @@ TestResult run_file_transfer_test(
         }
     }
     std::cout << "\n";
+
     size_t bit_errors = 0;
     size_t total_compared_bits = std::min(tx_all_bits.size(), rx_bits.size());
     double ber = compute_ber(tx_all_bits, rx_bits, bit_errors);
@@ -505,15 +788,16 @@ TestResult run_file_transfer_test(
 
     std::cout << "[DBG][TX bytes from tx_all_bits] ";
     for (size_t i = 0; i < std::min<size_t>(32, tx_bytes_dbg.size()); ++i) {
-        std::cout << (int)tx_bytes_dbg[i] << " ";
+        std::cout << static_cast<int>(tx_bytes_dbg[i]) << " ";
     }
     std::cout << "\n";
 
     std::cout << "[DBG][RX bytes from rx_bits] ";
     for (size_t i = 0; i < std::min<size_t>(32, rx_bytes_dbg.size()); ++i) {
-        std::cout << (int)rx_bytes_dbg[i] << " ";
+        std::cout << static_cast<int>(rx_bytes_dbg[i]) << " ";
     }
     std::cout << "\n";
+
     bool save_ok = recover_file_from_bits(rx_bits, output_file_path, recovered_filename);
 
     tr.file_saved = save_ok;
@@ -527,6 +811,52 @@ TestResult run_file_transfer_test(
     if (save_ok) {
         log << "RECOVERED ORIGINAL NAME = " << recovered_filename << "\n";
         log << "SAVED TO = " << output_file_path << "\n";
+    }
+
+    {
+        const VecComplex& tx_sig_full = tx.getLastPureModulatedSignal();
+
+        if (!tx_sig_full.empty())
+        {
+            const VecComplex tx_sig_wave_mid = extract_center_segment(tx_sig_full, 4000);
+            const VecComplex tx_sig_spec_mid = extract_center_segment(tx_sig_full, 1024);
+            const VecComplex tx_sig_tf_mid = extract_center_segment(tx_sig_full, 4096);
+
+            build_waveform_from_signal(
+                tx_sig_wave_mid,
+                modulation,
+                tr.waveform,
+                tr.waveform_type
+            );
+
+            build_spectrum_from_signal(
+                tx_sig_spec_mid,
+                cfg.fs,
+                tr.spectrum_freq,
+                tr.spectrum_mag
+            );
+
+            build_spectrogram(tx_sig_tf_mid, cfg.fs, tr);
+        }
+    }
+
+    {
+        const VecComplex rx_sig_wave_mid = extract_center_segment(rx_sig, 4000);
+        const VecComplex rx_sig_spec_mid = extract_center_segment(rx_sig, 1024);
+
+        build_waveform_from_signal(
+            rx_sig_wave_mid,
+            modulation,
+            tr.rx_waveform,
+            tr.rx_waveform_type
+        );
+
+        build_spectrum_from_signal(
+            rx_sig_spec_mid,
+            cfg.fs,
+            tr.rx_spectrum_freq,
+            tr.rx_spectrum_mag
+        );
     }
 
     tr.log_text = log.str();
@@ -566,7 +896,9 @@ SweepResult run_awgn_sweep(
             snr,
             tx_repeat_frames,
             center_freq_hz,
-            modulation
+            modulation,
+            50000.0,
+            1
         );
 
         SweepPoint pt;
