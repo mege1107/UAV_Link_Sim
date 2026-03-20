@@ -454,6 +454,8 @@ VecInt Receiver::demodulateTelemetry(const VecComplex& rx)
 // ====================== 主接收函数（锁帧+窄窗同步） ======================
 VecInt Receiver::receive(const VecComplex& rx_signal)
 {
+    last_constellation_points_.clear();
+
     const double fs = config_.fs;
     if (!std::isfinite(fs) || fs <= 0) {
         std::cerr << "[Receiver] ERROR: invalid fs=" << fs << "\n";
@@ -754,6 +756,8 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
                 payload_sig = applySRRCMatchedFilterAndAlign(payload_sig, s, 0.5, 6);
             }
         }
+        // ====== 保存星座图点（取最后一次成功锁帧的 payload） ======
+        buildConstellationPoints(payload_sig);
 
         // ====== 解调 ======
         VecInt rx_chips_or_syms = demodulateTelemetry(payload_sig);
@@ -1135,4 +1139,65 @@ VecInt Receiver::despreadCCSK(const VecInt& chips)
     }
 
     return decoded;
+}
+
+void Receiver::buildConstellationPoints(const VecComplex& payload_sig)
+{
+    last_constellation_points_.clear();
+
+    if (payload_sig.empty()) return;
+
+    const int s = std::max(1, config_.samp);
+    const size_t max_points = 600;
+
+    // ===== 线性调制：直接取每符号抽样点 =====
+    if (config_.modulation == ModulationType::BPSK ||
+        config_.modulation == ModulationType::QPSK ||
+        config_.modulation == ModulationType::QAM ||
+        config_.modulation == ModulationType::OOK)
+    {
+        for (size_t idx = 0; idx < payload_sig.size(); idx += (size_t)s) {
+            last_constellation_points_.push_back(payload_sig[idx]);
+            if (last_constellation_points_.size() >= max_points) break;
+        }
+
+        // QAM 单独做一下自适应归一化，显示更稳
+        if (config_.modulation == ModulationType::QAM) {
+            normalizeQAMSymbolsAdaptive(last_constellation_points_);
+        }
+
+        return;
+    }
+
+    // ===== FSK / FM / MSK：画差分相位“星座” =====
+    // 每个符号统计一次 conj(r[n-1])*r[n] 的平均值
+    if (config_.modulation == ModulationType::FSK ||
+        config_.modulation == ModulationType::FM ||
+        config_.modulation == ModulationType::MSK)
+    {
+        const size_t nsym = payload_sig.size() / (size_t)s;
+
+        for (size_t k = 0; k < nsym; ++k) {
+            const size_t base = k * (size_t)s;
+
+            Complex acc(0.0, 0.0);
+            int cnt = 0;
+
+            for (int j = 1; j < s; ++j) {
+                const size_t n = base + (size_t)j;
+                if (n >= payload_sig.size()) break;
+
+                acc += std::conj(payload_sig[n - 1]) * payload_sig[n];
+                cnt++;
+            }
+
+            if (cnt > 0) {
+                last_constellation_points_.push_back(acc / (double)cnt);
+            }
+
+            if (last_constellation_points_.size() >= max_points) break;
+        }
+
+        return;
+    }
 }

@@ -29,6 +29,146 @@ ApplicationWindow {
     }
 
     Component {
+        id: constellationViewComponent
+
+        Rectangle {
+            color: "#fcfcfc"
+            border.color: "#c8c8c8"
+            border.width: 1
+
+            Canvas {
+                id: constellationCanvas
+                anchors.fill: parent
+                renderStrategy: Canvas.Threaded
+
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
+
+                    var xs = backend.constellationI
+                    var ys = backend.constellationQ
+                    var N = Math.min(xs.length, ys.length)
+
+                    var left = 55
+                    var right = width - 20
+                    var top = 20
+                    var bottom = height - 45
+                    var plotW = right - left
+                    var plotH = bottom - top
+
+                    ctx.strokeStyle = "#d0d0d0"
+                    ctx.lineWidth = 1
+                    ctx.strokeRect(left, top, plotW, plotH)
+
+                    if (N < 1) {
+                        ctx.fillStyle = "#777777"
+                        ctx.font = "18px sans-serif"
+                        ctx.fillText("暂无星座图数据", width / 2 - 60, height / 2)
+                        return
+                    }
+
+                    var xmin = xs[0], xmax = xs[0]
+                    var ymin = ys[0], ymax = ys[0]
+
+                    for (var i = 1; i < N; ++i) {
+                        if (xs[i] < xmin) xmin = xs[i]
+                        if (xs[i] > xmax) xmax = xs[i]
+                        if (ys[i] < ymin) ymin = ys[i]
+                        if (ys[i] > ymax) ymax = ys[i]
+                    }
+
+                    var maxAbs = Math.max(Math.abs(xmin), Math.abs(xmax), Math.abs(ymin), Math.abs(ymax))
+                    if (maxAbs < 1e-6)
+                        maxAbs = 1.0
+
+                    var axisMin = -1.2 * maxAbs
+                    var axisMax = 1.2 * maxAbs
+                    var axisRange = axisMax - axisMin
+
+                    function mapX(x) {
+                        return left + (x - axisMin) / axisRange * plotW
+                    }
+
+                    function mapY(y) {
+                        return bottom - (y - axisMin) / axisRange * plotH
+                    }
+
+                    ctx.strokeStyle = "#e0e0e0"
+                    ctx.lineWidth = 1
+                    for (var k = 0; k <= 4; ++k) {
+                        var gx = left + k / 4 * plotW
+                        var gy = top + k / 4 * plotH
+
+                        ctx.beginPath()
+                        ctx.moveTo(gx, top)
+                        ctx.lineTo(gx, bottom)
+                        ctx.stroke()
+
+                        ctx.beginPath()
+                        ctx.moveTo(left, gy)
+                        ctx.lineTo(right, gy)
+                        ctx.stroke()
+                    }
+
+                    var x0 = mapX(0)
+                    var y0 = mapY(0)
+
+                    ctx.strokeStyle = "#808080"
+                    ctx.lineWidth = 1.2
+
+                    ctx.beginPath()
+                    ctx.moveTo(left, y0)
+                    ctx.lineTo(right, y0)
+                    ctx.stroke()
+
+                    ctx.beginPath()
+                    ctx.moveTo(x0, top)
+                    ctx.lineTo(x0, bottom)
+                    ctx.stroke()
+
+                    ctx.fillStyle = "#2c7be5"
+                    for (var p = 0; p < N; ++p) {
+                        var px = mapX(xs[p])
+                        var py = mapY(ys[p])
+
+                        ctx.beginPath()
+                        ctx.arc(px, py, 2.5, 0, 2 * Math.PI)
+                        ctx.fill()
+                    }
+
+                    ctx.fillStyle = "#666666"
+                    ctx.font = "12px sans-serif"
+                    ctx.fillText("In-Phase", width / 2 - 22, height - 10)
+
+                    ctx.save()
+                    ctx.translate(18, height / 2 + 20)
+                    ctx.rotate(-Math.PI / 2)
+                    ctx.fillText("Quadrature", 0, 0)
+                    ctx.restore()
+
+                    ctx.font = "11px sans-serif"
+                    for (var t = 0; t <= 4; ++t) {
+                        var xv = axisMin + t / 4 * axisRange
+                        var xp = left + t / 4 * plotW
+                        ctx.fillText(xv.toFixed(2), xp - 12, bottom + 16)
+
+                        var yv = axisMin + (4 - t) / 4 * axisRange
+                        var yp = top + t / 4 * plotH
+                        ctx.fillText(yv.toFixed(2), 5, yp + 4)
+                    }
+                }
+
+                Connections {
+                    target: backend
+                    function onConstellationChanged() {
+                        constellationCanvas.requestPaint()
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
         id: controlAnalysisComponent
 
         ColumnLayout {
@@ -43,6 +183,7 @@ ApplicationWindow {
                 TabButton { text: "时频分析" }
                 TabButton { text: "波形图" }
                 TabButton { text: "频谱图" }
+                TabButton { text: "星座图" }
             }
 
             StackLayout {
@@ -231,14 +372,14 @@ ApplicationWindow {
                             ctx.lineWidth = 1
                             ctx.beginPath()
 
-                            for (var i = 0; i < N; ++i) {
-                                var x = left + i / (N - 1) * plotW
-                                var y = bottom - (data[i] - minv) / range * plotH
+                            for (var i2 = 0; i2 < N; ++i2) {
+                                var x2 = left + i2 / (N - 1) * plotW
+                                var y2 = bottom - (data[i2] - minv) / range * plotH
 
-                                if (i === 0)
-                                    ctx.moveTo(x, y)
+                                if (i2 === 0)
+                                    ctx.moveTo(x2, y2)
                                 else
-                                    ctx.lineTo(x, y)
+                                    ctx.lineTo(x2, y2)
                             }
 
                             ctx.stroke()
@@ -285,9 +426,9 @@ ApplicationWindow {
                             var ymin = mag[0]
                             var ymax = mag[0]
 
-                            for (var i = 1; i < N; ++i) {
-                                if (mag[i] < ymin) ymin = mag[i]
-                                if (mag[i] > ymax) ymax = mag[i]
+                            for (var i3 = 1; i3 < N; ++i3) {
+                                if (mag[i3] < ymin) ymin = mag[i3]
+                                if (mag[i3] > ymax) ymax = mag[i3]
                             }
 
                             var xRange = xmax - xmin
@@ -312,14 +453,14 @@ ApplicationWindow {
                             ctx.lineWidth = 1
                             ctx.beginPath()
 
-                            for (var i = 0; i < N; ++i) {
-                                var x = left + (freq[i] - xmin) / xRange * plotW
-                                var y = bottom - (mag[i] - ymin) / yRange * plotH
+                            for (var i4 = 0; i4 < N; ++i4) {
+                                var x4 = left + (freq[i4] - xmin) / xRange * plotW
+                                var y4 = bottom - (mag[i4] - ymin) / yRange * plotH
 
-                                if (i === 0)
-                                    ctx.moveTo(x, y)
+                                if (i4 === 0)
+                                    ctx.moveTo(x4, y4)
                                 else
-                                    ctx.lineTo(x, y)
+                                    ctx.lineTo(x4, y4)
                             }
 
                             ctx.stroke()
@@ -340,8 +481,8 @@ ApplicationWindow {
                                 ctx.fillText(fLabel.toFixed(0), tx - 12, bottom + 15)
                             }
 
-                            for (var k = 0; k <= 4; ++k) {
-                                var ty = bottom - k / 4 * plotH
+                            for (var k2 = 0; k2 <= 4; ++k2) {
+                                var ty = bottom - k2 / 4 * plotH
 
                                 ctx.strokeStyle = "#cccccc"
                                 ctx.beginPath()
@@ -349,7 +490,7 @@ ApplicationWindow {
                                 ctx.lineTo(right, ty)
                                 ctx.stroke()
 
-                                var mLabel = ymin + k / 4 * yRange
+                                var mLabel = ymin + k2 / 4 * yRange
                                 ctx.fillText(mLabel.toFixed(1), 5, ty + 4)
                             }
                         }
@@ -361,6 +502,12 @@ ApplicationWindow {
                             }
                         }
                     }
+                }
+
+                Loader {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    sourceComponent: constellationViewComponent
                 }
             }
         }
@@ -388,7 +535,6 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 currentIndex: telemetryAnalysisTab.currentIndex
 
-                // ===== 接收端波形图 =====
                 Rectangle {
                     color: "#fcfcfc"
                     border.color: "#c8c8c8"
@@ -443,14 +589,14 @@ ApplicationWindow {
                             ctx.lineWidth = 1
                             ctx.beginPath()
 
-                            for (var i = 0; i < N; ++i) {
-                                var x = left + i / (N - 1) * plotW
-                                var y = bottom - (data[i] - minv) / range * plotH
+                            for (var i5 = 0; i5 < N; ++i5) {
+                                var x5 = left + i5 / (N - 1) * plotW
+                                var y5 = bottom - (data[i5] - minv) / range * plotH
 
-                                if (i === 0)
-                                    ctx.moveTo(x, y)
+                                if (i5 === 0)
+                                    ctx.moveTo(x5, y5)
                                 else
-                                    ctx.lineTo(x, y)
+                                    ctx.lineTo(x5, y5)
                             }
 
                             ctx.stroke()
@@ -465,7 +611,6 @@ ApplicationWindow {
                     }
                 }
 
-                // ===== 接收端频谱图 =====
                 Rectangle {
                     color: "#fcfcfc"
                     border.color: "#c8c8c8"
@@ -498,9 +643,9 @@ ApplicationWindow {
                             var ymin = mag[0]
                             var ymax = mag[0]
 
-                            for (var i = 1; i < N; ++i) {
-                                if (mag[i] < ymin) ymin = mag[i]
-                                if (mag[i] > ymax) ymax = mag[i]
+                            for (var i6 = 1; i6 < N; ++i6) {
+                                if (mag[i6] < ymin) ymin = mag[i6]
+                                if (mag[i6] > ymax) ymax = mag[i6]
                             }
 
                             var xRange = xmax - xmin
@@ -525,14 +670,14 @@ ApplicationWindow {
                             ctx.lineWidth = 1
                             ctx.beginPath()
 
-                            for (var i = 0; i < N; ++i) {
-                                var x = left + (freq[i] - xmin) / xRange * plotW
-                                var y = bottom - (mag[i] - ymin) / yRange * plotH
+                            for (var i7 = 0; i7 < N; ++i7) {
+                                var x7 = left + (freq[i7] - xmin) / xRange * plotW
+                                var y7 = bottom - (mag[i7] - ymin) / yRange * plotH
 
-                                if (i === 0)
-                                    ctx.moveTo(x, y)
+                                if (i7 === 0)
+                                    ctx.moveTo(x7, y7)
                                 else
-                                    ctx.lineTo(x, y)
+                                    ctx.lineTo(x7, y7)
                             }
 
                             ctx.stroke()
@@ -547,19 +692,10 @@ ApplicationWindow {
                     }
                 }
 
-                // ===== 星座图占位 =====
-                Rectangle {
-                    color: "#fcfcfc"
-                    border.color: "#c8c8c8"
-                    border.width: 1
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "星座图区域\n后续接收端 IQ 散点"
-                        font.pixelSize: 24
-                        horizontalAlignment: Text.AlignHCenter
-                        color: "#777777"
-                    }
+                Loader {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    sourceComponent: constellationViewComponent
                 }
             }
         }
@@ -652,7 +788,6 @@ ApplicationWindow {
             Layout.fillHeight: true
             spacing: 10
 
-            // 左侧控制区
             ColumnLayout {
                 Layout.fillHeight: true
                 Layout.preferredWidth: 470
@@ -960,7 +1095,6 @@ ApplicationWindow {
                 }
             }
 
-            // 右侧显示区
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true

@@ -33,6 +33,8 @@ public:
         int pulse_len,
         int gap_len) const;
 
+    const VecComplex& getLastConstellationPoints() const { return last_constellation_points_; }
+
 private:
     // ===== 频偏 / 相位相关 =====
     double estimateCFOFromPreamble(const VecComplex& rx_preamble,
@@ -57,6 +59,8 @@ private:
     int getTelemetryPayloadSampleCount(int ccsk_chip_num) const;
     bool modulationNeedsDiffDecode() const;
 
+    
+
 private:
     TransmitterConfig config_;
 
@@ -66,4 +70,7 @@ private:
     double fit_a_ = 0.0;
     double fit_b_ = 0.0;
     int frame_count_ = 0;
+
+    void buildConstellationPoints(const VecComplex& payload_sig);
+    VecComplex last_constellation_points_;
 };

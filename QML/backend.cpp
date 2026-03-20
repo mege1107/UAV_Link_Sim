@@ -11,6 +11,7 @@
 #include <QStringConverter>
 #include <algorithm>
 #include <exception>
+#include <stdexcept>
 
 Backend::Backend(QObject *parent)
     : QObject(parent),
@@ -683,6 +684,21 @@ void Backend::handleSimulationFinished()
 
         emit spectrogramChanged();
 
+        m_constellationI.clear();
+        m_constellationQ.clear();
+
+        const int constN = std::min(
+            static_cast<int>(tr.constellation_i.size()),
+            static_cast<int>(tr.constellation_q.size())
+            );
+
+        for (int i = 0; i < constN; ++i) {
+            m_constellationI.append(tr.constellation_i[i]);
+            m_constellationQ.append(tr.constellation_q[i]);
+        }
+
+        emit constellationChanged();
+
         appendLog(QString::fromStdString(tr.log_text));
 
         if (tr.file_saved) {
@@ -728,6 +744,16 @@ QVariantList Backend::rxSpectrumFreq() const
 QVariantList Backend::rxSpectrumMag() const
 {
     return m_rxSpectrumMag;
+}
+
+QVariantList Backend::constellationI() const
+{
+    return m_constellationI;
+}
+
+QVariantList Backend::constellationQ() const
+{
+    return m_constellationQ;
 }
 
 void Backend::applyTestResult(const TestResult &tr)
@@ -842,6 +868,21 @@ void Backend::applyTestResult(const TestResult &tr)
     }
 
     emit spectrogramChanged();
+
+    m_constellationI.clear();
+    m_constellationQ.clear();
+
+    const int constN = std::min(
+        static_cast<int>(tr.constellation_i.size()),
+        static_cast<int>(tr.constellation_q.size())
+        );
+
+    for (int i = 0; i < constN; ++i) {
+        m_constellationI.append(tr.constellation_i[i]);
+        m_constellationQ.append(tr.constellation_q[i]);
+    }
+
+    emit constellationChanged();
 
     appendLog(QString::fromStdString(tr.log_text));
 

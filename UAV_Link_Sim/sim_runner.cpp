@@ -188,11 +188,11 @@ std::string modulation_to_string(ModulationType m)
     {
     case ModulationType::BPSK: return "BPSK";
     case ModulationType::QPSK: return "QPSK";
-    case ModulationType::QAM: return "QAM";
-    case ModulationType::OOK: return "OOK";
-    case ModulationType::FSK: return "FSK";
-    case ModulationType::FM: return "FM";
-    case ModulationType::MSK: return "MSK";
+    case ModulationType::QAM:  return "QAM";
+    case ModulationType::OOK:  return "OOK";
+    case ModulationType::FSK:  return "FSK";
+    case ModulationType::FM:   return "FM";
+    case ModulationType::MSK:  return "MSK";
     default: return "UNKNOWN";
     }
 }
@@ -204,11 +204,11 @@ ModulationType parse_modulation(const std::string& s)
 
     if (t == "bpsk") return ModulationType::BPSK;
     if (t == "qpsk") return ModulationType::QPSK;
-    if (t == "qam") return ModulationType::QAM;
-    if (t == "ook") return ModulationType::OOK;
-    if (t == "fsk") return ModulationType::FSK;
-    if (t == "fm") return ModulationType::FM;
-    if (t == "msk") return ModulationType::MSK;
+    if (t == "qam")  return ModulationType::QAM;
+    if (t == "ook")  return ModulationType::OOK;
+    if (t == "fsk")  return ModulationType::FSK;
+    if (t == "fm")   return ModulationType::FM;
+    if (t == "msk")  return ModulationType::MSK;
 
     throw std::runtime_error("Unknown modulation");
 }
@@ -219,8 +219,8 @@ RunMode parse_mode(const std::string& s)
     std::transform(t.begin(), t.end(), t.begin(), ::tolower);
 
     if (t == "loopback") return RunMode::LOOPBACK;
-    if (t == "awgn") return RunMode::AWGN;
-    if (t == "usrp") return RunMode::USRP;
+    if (t == "awgn")     return RunMode::AWGN;
+    if (t == "usrp")     return RunMode::USRP;
 
     throw std::runtime_error("Unknown mode");
 }
@@ -327,6 +327,7 @@ static void build_spectrum_from_signal(
     }
 
     const size_t N = sig_mid.size();
+    if (N < 2) return;
 
     std::vector<std::complex<double>> x(N);
 
@@ -436,6 +437,24 @@ static void build_spectrogram(
     }
 }
 
+static void build_constellation_result(
+    const VecComplex& pts,
+    TestResult& tr)
+{
+    tr.constellation_i.clear();
+    tr.constellation_q.clear();
+
+    const size_t N = std::min<size_t>(pts.size(), 600);
+
+    tr.constellation_i.reserve(N);
+    tr.constellation_q.reserve(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        tr.constellation_i.push_back(pts[i].real());
+        tr.constellation_q.push_back(pts[i].imag());
+    }
+}
+
 TestResult run_one_test(
     RunMode mode,
     double awgn_snr_db,
@@ -532,6 +551,9 @@ TestResult run_one_test(
 
     VecInt rx_bits = rx.receive(rx_sig);
 
+    TestResult tr;
+    build_constellation_result(rx.getLastConstellationPoints(), tr);
+
     const size_t bits_per_frame = one_frame_bits.size();
     const size_t decoded_frames = bits_per_frame > 0 ? (rx_bits.size() / bits_per_frame) : 0;
 
@@ -551,8 +573,6 @@ TestResult run_one_test(
         total_bit_errors += frame_errors;
         total_compared_bits += bits_per_frame;
     }
-
-    TestResult tr;
 
     tr.total_bit_errors = total_bit_errors;
     tr.total_compared_bits = total_compared_bits;
@@ -618,6 +638,7 @@ TestResult run_one_test(
             << ", spectrum = " << rx_sig_spec_mid.size() << "\n";
     }
 
+    log << "[CONSTELLATION POINTS] " << tr.constellation_i.size() << "\n";
     log << "[RX BITS] " << rx_bits.size() << "\n";
     log << "[DECODED FRAMES] " << decoded_frames << "\n";
     log << "BER = " << tr.total_ber << "\n";
@@ -753,6 +774,9 @@ TestResult run_file_transfer_test(
 
     VecInt rx_bits = rx.receive(rx_sig);
 
+    TestResult tr;
+    build_constellation_result(rx.getLastConstellationPoints(), tr);
+
     std::cout << "[DBG][TX bits first 80] ";
     for (size_t i = 0; i < std::min<size_t>(80, tx_all_bits.size()); ++i) {
         std::cout << tx_all_bits[i];
@@ -777,7 +801,6 @@ TestResult run_file_transfer_test(
     size_t total_compared_bits = std::min(tx_all_bits.size(), rx_bits.size());
     double ber = compute_ber(tx_all_bits, rx_bits, bit_errors);
 
-    TestResult tr;
     tr.total_compared_bits = total_compared_bits;
     tr.total_bit_errors = bit_errors;
     tr.decoded_frames = bits_per_frame ? (rx_bits.size() / bits_per_frame) : 0;
@@ -804,6 +827,7 @@ TestResult run_file_transfer_test(
     tr.file_saved = save_ok;
     tr.saved_file_path = save_ok ? output_file_path : "";
 
+    log << "[CONSTELLATION POINTS] " << tr.constellation_i.size() << "\n";
     log << "[RX BITS] " << rx_bits.size() << "\n";
     log << "[DECODED FRAMES] " << tr.decoded_frames << "\n";
     log << "BER = " << tr.total_ber << "\n";
