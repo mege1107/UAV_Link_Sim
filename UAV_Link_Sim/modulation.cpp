@@ -8,39 +8,7 @@
 
 namespace {
 
-// 设计 sqrt raised cosine (对应 MATLAB rcosdesign(beta, span, sps, 'sqrt'))
-VecDouble designSRRC(double beta, int span, int sps)
-{
-    if (sps <= 0 || span <= 0) return {};
 
-    const int N = span * sps + 1;
-    const int mid = N / 2;
-    VecDouble h(N, 0.0);
-
-    for (int i = 0; i < N; ++i) {
-        const double t = (double)(i - mid) / (double)sps;
-
-        if (std::abs(t) < 1e-12) {
-            h[i] = 1.0 + beta * (4.0 / PI - 1.0);
-        }
-        else if (beta > 0.0 && std::abs(std::abs(t) - 1.0 / (4.0 * beta)) < 1e-12) {
-            const double a = (1.0 + 2.0 / PI) * std::sin(PI / (4.0 * beta));
-            const double b = (1.0 - 2.0 / PI) * std::cos(PI / (4.0 * beta));
-            h[i] = (beta / std::sqrt(2.0)) * (a + b);
-        }
-        else {
-            const double num =
-                std::sin(PI * t * (1.0 - beta)) +
-                4.0 * beta * t * std::cos(PI * t * (1.0 + beta));
-            const double den =
-                PI * t * (1.0 - std::pow(4.0 * beta * t, 2.0));
-
-            h[i] = (std::abs(den) < 1e-12) ? 0.0 : (num / den);
-        }
-    }
-
-    return h;
-}
 
 // MATLAB filter(b,1,x) 风格：输出长度 == 输入长度
 VecDouble firFilterSameLength(const VecDouble& b, const VecDouble& x)
@@ -170,51 +138,74 @@ VecComplex fskmod(const VecInt& bits, int M, double deta_f, int samp, double fs)
     return tx;
 }
 
-// FM调制（严格对齐 MATLAB 逻辑）
-VecComplex fmmod(const VecInt& bits, int samp, double fs, double kf) {
-    if (samp <= 0 || fs <= 0.0) return {};
+// FM调制（严格对齐 MATLAB）
+// 对应 MATLAB:
+// encoded_msg = d_encode(bits);
+// bipolar = 2*encoded_msg - 1;
+// rcos_fir = rcosdesign(0.5, 6, samp, 'sqrt');
+// filter_delay = (length(rcos_fir)-1)/2;
+// up = upsample(bipolar, samp);
+// up = [up, zeros(1, filter_delay)];
+// m = filter(rcos_fir, 1, up);
+// m = m(filter_delay+1:end);
+// phi = 2*pi*kf*cumsum(m)/fs;
+// txSig = exp(1j*phi).';
+VecComplex fmmod(const VecInt& bits, int samp, double fs, double kf)
+{
+    if (bits.empty() || samp <= 0 || fs <= 0.0) return {};
 
     // 1) 差分编码
-    VecInt diff = d_encode(bits);
+    VecInt encoded_msg = d_encode(bits);
 
-    // 2) 双极性映射
-    VecDouble bipolar(diff.size(), 0.0);
-    for (size_t i = 0; i < diff.size(); ++i) {
-        bipolar[i] = diff[i] ? 1.0 : -1.0;
+    // 2) 双极性映射：0 -> -1, 1 -> +1
+    VecDouble bipolar_msg_source(encoded_msg.size(), 0.0);
+    for (size_t i = 0; i < encoded_msg.size(); ++i) {
+        bipolar_msg_source[i] = 2.0 * (double)encoded_msg[i] - 1.0;
     }
 
     // 3) SRRC 滤波器
-    const double rolloff = 0.5;
+    const double rolloff_factor = 0.5;
     const int span = 6;
-    VecDouble rcos_fir = designSRRC(rolloff, span, samp);
+    VecDouble rcos_fir = designSRRC(rolloff_factor, span, samp);
     const int filter_delay = (int)(rcos_fir.size() - 1) / 2;
 
     // 4) 上采样
-    VecDouble up((size_t)bipolar.size() * (size_t)samp, 0.0);
-    for (size_t i = 0; i < bipolar.size(); ++i) {
-        up[i * (size_t)samp] = bipolar[i];
+    VecDouble up_bipolar_msg_source(encoded_msg.size() * (size_t)samp, 0.0);
+    for (size_t i = 0; i < bipolar_msg_source.size(); ++i) {
+        up_bipolar_msg_source[i * (size_t)samp] = bipolar_msg_source[i];
     }
 
-    // 5) 尾部补零（和 MATLAB 一致）
-    up.insert(up.end(), (size_t)filter_delay, 0.0);
+    // 5) MATLAB: up_bipolar_msg_source = [up_bipolar_msg_source, zeros(1, filter_delay)];
+    up_bipolar_msg_source.insert(up_bipolar_msg_source.end(), (size_t)filter_delay, 0.0);
 
-    // 6) 成形滤波，输出长度与输入长度相同
-    VecDouble m = firFilterSameLength(rcos_fir, up);
+    // 6) MATLAB 的 filter(rcos_fir, 1, x)
+    // 输出长度与输入长度相同，是“因果 FIR”滤波
+    VecDouble m(up_bipolar_msg_source.size(), 0.0);
+    for (size_t n = 0; n < up_bipolar_msg_source.size(); ++n) {
+        double acc = 0.0;
+        for (size_t k = 0; k < rcos_fir.size(); ++k) {
+            if (n >= k) {
+                acc += rcos_fir[k] * up_bipolar_msg_source[n - k];
+            }
+        }
+        m[n] = acc;
+    }
 
-    // 7) 去掉前 filter_delay
-    if ((int)m.size() <= filter_delay) return {};
-    m.erase(m.begin(), m.begin() + filter_delay);
+    // 7) MATLAB: m = m(filter_delay+1:end);
+    if (m.size() <= (size_t)filter_delay) return {};
+    VecDouble m_aligned(m.begin() + filter_delay, m.end());
 
-    // 现在长度应回到 bits.size() * samp
-    VecComplex tx;
-    tx.reserve(m.size());
+    // 现在长度应为 bits.size() * samp
+    // 8) FM 调制：phi = 2*pi*kf*cumsum(m)/fs
+    VecComplex txSig;
+    txSig.reserve(m_aligned.size());
 
-    // 8) FM 调制
     double phi = 0.0;
-    for (double v : m) {
-        phi += 2.0 * PI * kf * v / fs;
-        tx.emplace_back(std::cos(phi), std::sin(phi));
+    const double scale = 2.0 * PI * kf / fs;
+    for (double v : m_aligned) {
+        phi += scale * v;
+        txSig.emplace_back(std::cos(phi), std::sin(phi));
     }
 
-    return tx;
+    return txSig;
 }

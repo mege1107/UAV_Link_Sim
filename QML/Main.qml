@@ -43,7 +43,6 @@ ApplicationWindow {
                 TabButton { text: "时频分析" }
                 TabButton { text: "波形图" }
                 TabButton { text: "频谱图" }
-                TabButton { text: "跳频频谱图" }
             }
 
             StackLayout {
@@ -361,20 +360,6 @@ ApplicationWindow {
                                 spectrumCanvas.requestPaint()
                             }
                         }
-                    }
-                }
-
-                Rectangle {
-                    color: "#fcfcfc"
-                    border.color: "#c8c8c8"
-                    border.width: 1
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "跳频频谱图区域\n后续接真实曲线"
-                        font.pixelSize: 24
-                        horizontalAlignment: Text.AlignHCenter
-                        color: "#777777"
                     }
                 }
             }
@@ -727,8 +712,8 @@ ApplicationWindow {
                             Label { text: "信息速率"; font.pixelSize: 15 }
                             RowLayout {
                                 ComboBox {
-                                    Layout.preferredWidth: 90
-                                    model: ["4", "8", "16", "32", "64", "128"]
+                                    Layout.preferredWidth: 110
+                                    model: ["4", "8", "16", "32", "64", "128", "256", "512", "1024"]
                                     currentIndex: Math.max(0, model.indexOf(backend.infoRate))
                                     onActivated: backend.infoRate = currentText
                                 }
@@ -1044,33 +1029,33 @@ ApplicationWindow {
                                     spacing: 6
 
                                     FrameBlock {
-                                        label: "指导步序列"
+                                        label: "同步头"
                                         blockColor: "#ea812d"
-                                        width: 120
+                                        width: 130
                                         height: 50
                                     }
 
                                     FrameBlock {
-                                        label: "帧同步"
+                                        label: "数据"
                                         blockColor: "#446fc9"
-                                        width: 90
+                                        width: 300
                                         height: 50
                                     }
 
                                     FrameBlock {
-                                        label: "数据部分"
+                                        label: "补零"
                                         blockColor: "#79c341"
-                                        width: 220
+                                        width: 120
                                         height: 50
                                     }
                                 }
 
                                 RowLayout {
                                     Layout.alignment: Qt.AlignHCenter
-                                    spacing: 8
-                                    Label { text: "·"; font.pixelSize: 20 }
-                                    Label { text: "·"; font.pixelSize: 20 }
-                                    Label { text: "·"; font.pixelSize: 20 }
+                                    spacing: 90
+                                    Label { text: "338samples"; font.pixelSize: 20 }
+                                    Label { text: "99200samples"; font.pixelSize: 20 }
+                                    Label { text: "264samples"; font.pixelSize: 20 }
                                 }
 
                                 Item { Layout.fillHeight: true }

@@ -102,3 +102,42 @@ VecInt generateRandomBits(int length) {
     }
     return bits;
 }
+
+// 设计 sqrt raised cosine (对应 MATLAB rcosdesign(beta, span, sps, 'sqrt'))
+VecDouble designSRRC(double beta, int span, int sps)
+{
+    if (sps <= 0 || span <= 0) return {};
+
+    const int N = span * sps + 1;
+    const int mid = N / 2;
+    VecDouble h(N, 0.0);
+
+    for (int i = 0; i < N; ++i) {
+        double t = (double)(i - mid) / (double)sps;
+
+        if (std::abs(t) < 1e-12) {
+            h[i] = 1.0 - beta + 4.0 * beta / PI;
+        }
+        else if (beta > 0.0 && std::abs(std::abs(t) - 1.0 / (4.0 * beta)) < 1e-12) {
+            double term1 = (1.0 + 2.0 / PI) * std::sin(PI / (4.0 * beta));
+            double term2 = (1.0 - 2.0 / PI) * std::cos(PI / (4.0 * beta));
+            h[i] = (beta / std::sqrt(2.0)) * (term1 + term2);
+        }
+        else {
+            double num1 = std::sin(PI * t * (1.0 - beta));
+            double num2 = 4.0 * beta * t * std::cos(PI * t * (1.0 + beta));
+            double den = PI * t * (1.0 - 16.0 * beta * beta * t * t);
+            h[i] = (num1 + num2) / den;
+        }
+    }
+
+    // 能量归一化
+    double energy = 0.0;
+    for (double v : h) energy += v * v;
+    if (energy > 0.0) {
+        double scale = 1.0 / std::sqrt(energy);
+        for (double& v : h) v *= scale;
+    }
+
+    return h;
+}

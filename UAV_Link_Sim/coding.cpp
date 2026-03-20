@@ -446,11 +446,13 @@ VecInt d_decode(const VecInt& diff)
 {
     if (diff.empty()) return {};
 
-    VecInt data(diff.size());
-    data[0] = diff[0] & 1;
+    VecInt data(diff.size(), 0);
 
-    for (size_t i = 1; i < diff.size(); ++i)
-        data[i] = (diff[i] & 1) ^ (diff[i - 1] & 1);
+    int b_prev = 1;
+    for (size_t i = 0; i < diff.size(); ++i) {
+        data[i] = (diff[i] & 1) ^ b_prev;
+        b_prev = diff[i] & 1;
+    }
 
     return data;
 }

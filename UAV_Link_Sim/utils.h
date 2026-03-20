@@ -21,3 +21,6 @@ void setRandomSeed(int seed);
 
 // 生成随机二进制序列
 VecInt generateRandomBits(int length); 
+
+
+VecDouble designSRRC(double beta, int span, int sps);

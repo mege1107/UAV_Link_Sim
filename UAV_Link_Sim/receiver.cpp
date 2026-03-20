@@ -388,8 +388,7 @@ int Receiver::getTelemetryPayloadSampleCount(int ccsk_chip_num) const
 // ====================== 哪些调制需要差分解码 ======================
 bool Receiver::modulationNeedsDiffDecode() const
 {
-    return (config_.modulation == ModulationType::BPSK ||
-        config_.modulation == ModulationType::FM);
+    return (config_.modulation == ModulationType::BPSK);
 }
 
 // ====================== 统一解调入口 ======================
@@ -621,8 +620,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         const bool need_cfo_correction =
             (config_.modulation == ModulationType::BPSK ||
                 config_.modulation == ModulationType::QPSK ||
-                config_.modulation == ModulationType::QAM ||
-                config_.modulation == ModulationType::FM);
+                config_.modulation == ModulationType::QAM);
 
         if (config_.enable_cfo && need_cfo_correction && f_hat != 0.0) {
             for (size_t n = 0; n < current_frame.size(); ++n) {
@@ -643,8 +641,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         const bool need_phase_rotation =
             (config_.modulation == ModulationType::BPSK ||
                 config_.modulation == ModulationType::QPSK ||
-                config_.modulation == ModulationType::QAM ||
-                config_.modulation == ModulationType::FM);
+                config_.modulation == ModulationType::QAM);
 
         if (need_phase_rotation && residual_phase != 0.0) {
             Complex ph_rot = std::conj(Complex(std::cos(residual_phase), std::sin(residual_phase)));
@@ -987,30 +984,90 @@ VecInt Receiver::demodulateFSK(const VecComplex& rx)
 }
 
 // ====================== FM ======================
+// 严格对齐 MATLAB:
+// kf = 75e5;
+// ts = 1/fs;
+// prod_diff = rcvNoisy_w(2:end) .* conj(rcvNoisy_w(1:end-1));
+// phase_diff = angle(prod_diff);
+// dem = phase_diff.'/ (2 * pi * kf * ts);
+// dem = [0, dem];
+//
+// rcos_fir = rcosdesign(0.5, 6, samp, 'sqrt');
+// filter_delay = (length(rcos_fir) - 1)/2;
+// rcvNoisy_w = [dem, zeros(1,filter_delay)];
+// dem_filtered = filter(rcos_fir, 1, rcvNoisy_w);
+// dem_filtered_aligned = dem_filtered(filter_delay+1:end);
+//
+// symbols_sampled = dem_filtered_aligned(1:samp:end);
+// received_bits = symbols_sampled > 0;
+//
+// b_prev = 1;
+// decode_output(i) = xor(received_bits(i), b_prev);
+// b_prev = received_bits(i);
 VecInt Receiver::demodulateFM(const VecComplex& rx)
 {
-    VecInt bits;
-    const int s = std::max(1, config_.samp);
-
     if (rx.size() < 2) return {};
 
-    VecDouble disc(rx.size(), 0.0);
-    disc[0] = 0.0;
+    const int samp = std::max(1, config_.samp);
+    const double fs = config_.fs;     // 如果你的字段名是 sample_rate，这里改成 config_.sample_rate
+    const double kf = 75e5;
+    const double ts = 1.0 / fs;
 
+    // 1) 复数差分解调
+    VecDouble dem;
+    dem.reserve(rx.size());
+    dem.push_back(0.0); // MATLAB: dem = [0, dem]
+
+    const double denom = 2.0 * PI * kf * ts;
     for (size_t n = 1; n < rx.size(); ++n) {
-        Complex z = std::conj(rx[n - 1]) * rx[n];
-        disc[n] = std::atan2(z.imag(), z.real());
+        Complex prod_diff = rx[n] * std::conj(rx[n - 1]);
+        double phase_diff = std::atan2(prod_diff.imag(), prod_diff.real());
+        dem.push_back(phase_diff / denom);
     }
 
-    for (size_t base = 0; base + (size_t)s <= rx.size(); base += (size_t)s) {
+    // 2) SRRC 匹配滤波器
+    const double rolloff_factor = 0.5;
+    const int span = 6;
+    VecDouble rcos_fir = designSRRC(rolloff_factor, span, samp);
+    const int filter_delay = (int)(rcos_fir.size() - 1) / 2;
+
+    // 3) MATLAB: rcvNoisy_w = [dem, zeros(1, filter_delay)]
+    VecDouble dem_padded = dem;
+    dem_padded.insert(dem_padded.end(), (size_t)filter_delay, 0.0);
+
+    // 4) MATLAB: dem_filtered = filter(rcos_fir, 1, dem_padded)
+    VecDouble dem_filtered(dem_padded.size(), 0.0);
+    for (size_t n = 0; n < dem_padded.size(); ++n) {
         double acc = 0.0;
-        for (int j = 0; j < s; ++j) {
-            acc += disc[base + (size_t)j];
+        for (size_t k = 0; k < rcos_fir.size(); ++k) {
+            if (n >= k) {
+                acc += rcos_fir[k] * dem_padded[n - k];
+            }
         }
-        bits.push_back(acc > 0.0 ? 1 : 0);
+        dem_filtered[n] = acc;
     }
 
-    return bits;
+    // 5) MATLAB: dem_filtered_aligned = dem_filtered(filter_delay+1:end)
+    if (dem_filtered.size() <= (size_t)filter_delay) return {};
+    VecDouble dem_filtered_aligned(dem_filtered.begin() + filter_delay, dem_filtered.end());
+
+    // 6) MATLAB: symbols_sampled = dem_filtered_aligned(1:samp:end)
+    VecInt received_bits;
+    received_bits.reserve((dem_filtered_aligned.size() + samp - 1) / samp);
+
+    for (size_t i = 0; i < dem_filtered_aligned.size(); i += (size_t)samp) {
+        received_bits.push_back(dem_filtered_aligned[i] > 0.0 ? 1 : 0);
+    }
+
+    // 7) 差分解码（严格对齐 MATLAB）
+    VecInt decode_output(received_bits.size(), 0);
+    int b_prev = 1;
+    for (size_t i = 0; i < received_bits.size(); ++i) {
+        decode_output[i] = received_bits[i] ^ b_prev;
+        b_prev = received_bits[i];
+    }
+
+    return decode_output;
 }
 
 // ====================== MSK ======================
@@ -1045,7 +1102,8 @@ VecInt Receiver::demodulateMSK(const VecComplex& rx)
     return bits;
 }
 
-VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_gap,
+VecComplex Receiver::dehopRemoteControlPayload(
+    const VecComplex& payload_with_gap,
     int total_pulses,
     int pulse_len,
     int gap_len) const
@@ -1053,27 +1111,32 @@ VecComplex Receiver::dehopRemoteControlPayload(const VecComplex& payload_with_ga
     VecComplex out = payload_with_gap;
     if (out.empty() || total_pulses <= 0 || pulse_len <= 0) return out;
 
-    VecDouble frq_seq = generate_sequence(-13e3, 13e3, 3e3, total_pulses, config_.hop_pattern);
+    // MATLAB 对应：
+    // generate_sequence([-13,13], 3, total_pulses, seed) * 1e6
+    VecDouble frq_seq = generate_sequence(-13, 13, 3, total_pulses, config_.hop_pattern);
 
     const double fs = config_.fs;
     if (!std::isfinite(fs) || fs <= 0.0) return out;
 
     size_t pos = 0;
-    for (int p = 0; p < total_pulses; ++p) {
-        if (pos + (size_t)pulse_len > out.size()) break;
+    for (int p = 0; p < total_pulses; ++p)
+    {
+        if (pos + static_cast<size_t>(pulse_len) > out.size()) break;
 
-        const double f = frq_seq[(size_t)p];
+        const double f = frq_seq[static_cast<size_t>(p)];
 
-        for (int j = 0; j < pulse_len; ++j) {
-            const double t = (double)j / fs;
+        for (int j = 0; j < pulse_len; ++j)
+        {
+            // 必须和 TX 端 frequencyHop 的时间定义一致
+            const double t = static_cast<double>(j + 1) / fs;
             const double ang = -2.0 * PI * f * t;
-            out[pos + (size_t)j] *= Complex(std::cos(ang), std::sin(ang));
+            out[pos + static_cast<size_t>(j)] *= Complex(std::cos(ang), std::sin(ang));
         }
 
-        pos += (size_t)pulse_len;
+        pos += static_cast<size_t>(pulse_len);
 
-        if (pos + (size_t)gap_len <= out.size()) {
-            pos += (size_t)gap_len;
+        if (pos + static_cast<size_t>(gap_len) <= out.size()) {
+            pos += static_cast<size_t>(gap_len);
         }
     }
 
