@@ -8,26 +8,69 @@
 
 namespace {
 
+    // MATLAB filter(b,1,x) 风格：输出长度 == 输入长度
+    VecDouble firFilterSameLength(const VecDouble& b, const VecDouble& x)
+    {
+        if (b.empty() || x.empty()) return {};
 
+        VecDouble y(x.size(), 0.0);
 
-// MATLAB filter(b,1,x) 风格：输出长度 == 输入长度
-VecDouble firFilterSameLength(const VecDouble& b, const VecDouble& x)
-{
-    if (b.empty() || x.empty()) return {};
-
-    VecDouble y(x.size(), 0.0);
-
-    for (size_t n = 0; n < x.size(); ++n) {
-        double acc = 0.0;
-        const size_t kmax = std::min(n, b.size() - 1);
-        for (size_t k = 0; k <= kmax; ++k) {
-            acc += b[k] * x[n - k];
+        for (size_t n = 0; n < x.size(); ++n) {
+            double acc = 0.0;
+            const size_t kmax = std::min(n, b.size() - 1);
+            for (size_t k = 0; k <= kmax; ++k) {
+                acc += b[k] * x[n - k];
+            }
+            y[n] = acc;
         }
-        y[n] = acc;
+
+        return y;
     }
 
-    return y;
-}
+    // 复数版 MATLAB filter(b,1,x)
+    VecComplex firFilterSameLengthComplex(const VecDouble& b, const VecComplex& x)
+    {
+        if (b.empty() || x.empty()) return {};
+
+        VecComplex y(x.size(), Complex(0.0, 0.0));
+
+        for (size_t n = 0; n < x.size(); ++n) {
+            Complex acc(0.0, 0.0);
+            const size_t kmax = std::min(n, b.size() - 1);
+            for (size_t k = 0; k <= kmax; ++k) {
+                acc += x[n - k] * b[k];
+            }
+            y[n] = acc;
+        }
+
+        return y;
+    }
+
+    // 发射端 RRC 成形：
+    // 1) upsample
+    // 2) 末尾补 filter_delay 个 0
+    // 3) filter
+    // 4) 去掉前 filter_delay 个点
+    // 最终输出长度 = symbols.size() * sps
+    VecComplex rrcPulseShape(const VecComplex& symbols, int sps, double beta = 0.5, int span = 6)
+    {
+        if (symbols.empty() || sps <= 0) return {};
+
+        VecDouble rrc = designSRRC(beta, span, sps);
+        const int filter_delay = (int)(rrc.size() - 1) / 2;
+
+        VecComplex up(symbols.size() * (size_t)sps, Complex(0.0, 0.0));
+        for (size_t i = 0; i < symbols.size(); ++i) {
+            up[i * (size_t)sps] = symbols[i];
+        }
+
+        up.insert(up.end(), (size_t)filter_delay, Complex(0.0, 0.0));
+
+        VecComplex y = firFilterSameLengthComplex(rrc, up);
+        if (y.size() <= (size_t)filter_delay) return {};
+
+        return VecComplex(y.begin() + filter_delay, y.end());
+    }
 
 } // namespace
 
@@ -57,36 +100,51 @@ VecComplex mskmod(const VecInt& bits, int samp)
     return tx;
 }
 
-// BPSK调制
-VecComplex bpskmod(const VecInt& bits, int samp) {
-    VecComplex upsampled = upsampleComplex(VecComplex(bits.size()), samp);
-    for (size_t i = 0; i < bits.size(); ++i) {
-        upsampled[i * samp] = bits[i] ? 1.0 : -1.0;
+// BPSK调制（RRC成形）
+VecComplex bpskmod(const VecInt& bits, int samp)
+{
+    if (bits.empty() || samp <= 0) return {};
+
+    VecComplex symbols;
+    symbols.reserve(bits.size());
+
+    for (int b : bits) {
+        symbols.emplace_back(b ? 1.0 : -1.0, 0.0);
     }
-    return upsampled;
+
+    return rrcPulseShape(symbols, samp, 0.5, 6);
 }
 
-// QPSK调制 (Gray编码, pi/4偏移)
-VecComplex qpskmod(const VecInt& bits, int samp, double& fs) {
-    fs /= 2.0;
+// QPSK调制（按你 MATLAB 那版：I/Q 直接映射到 ±1，再做 RRC）
+VecComplex qpskmod(const VecInt& bits, int samp)
+{
+    if (bits.empty() || samp <= 0) return {};
+
     VecComplex symbols;
+    symbols.reserve((bits.size() + 1) / 2);
 
     for (size_t i = 0; i < bits.size(); i += 2) {
-        int b0 = bits[i];
-        int b1 = (i + 1 < bits.size()) ? bits[i + 1] : 0;
-        double theta = (2 * (b0 ^ b1) + 1) * PI / 4 + (b1 ? PI : 0);
-        symbols.emplace_back(std::cos(theta), std::sin(theta));
+        int I = bits[i];
+        int Q = (i + 1 < bits.size()) ? bits[i + 1] : 0;
+
+        double re = 2.0 * (double)I - 1.0;
+        double im = 2.0 * (double)Q - 1.0;
+
+        symbols.emplace_back(re / std::sqrt(2.0), im / std::sqrt(2.0));
     }
 
-    return upsampleComplex(symbols, samp);
+    return rrcPulseShape(symbols, samp, 0.5, 6);
 }
 
-// 16QAM调制
-VecComplex qammod(const VecInt& bits, int samp, double& fs) {
-    fs /= 4.0;
-    VecComplex symbols;
+// 16QAM调制（自然二进制映射，带 RRC）
+VecComplex qammod(const VecInt& bits, int samp)
+{
+    if (bits.empty() || samp <= 0) return {};
 
-    const double map[4] = { -3.0, -1.0, 1.0, 3.0 };
+    const double levels[4] = { -3.0, -1.0, 1.0, 3.0 };
+
+    VecComplex symbols;
+    symbols.reserve((bits.size() + 3) / 4);
 
     for (size_t i = 0; i < bits.size(); i += 4) {
         int b0 = bits[i];
@@ -94,23 +152,32 @@ VecComplex qammod(const VecInt& bits, int samp, double& fs) {
         int b2 = (i + 2 < bits.size()) ? bits[i + 2] : 0;
         int b3 = (i + 3 < bits.size()) ? bits[i + 3] : 0;
 
-        int I_idx = 2 * (b0 ^ b1) + b1;
-        int Q_idx = 2 * (b2 ^ b3) + b3;
+        int I_idx = (b0 << 1) | b1;
+        int Q_idx = (b2 << 1) | b3;
 
-        symbols.emplace_back(map[I_idx], map[Q_idx]);
+        symbols.emplace_back(levels[I_idx], levels[Q_idx]);
     }
 
+    // 平均功率归一化
     const double norm = std::sqrt(10.0);
     for (auto& s : symbols) s /= norm;
 
-    return upsampleComplex(symbols, samp);
+    return rrcPulseShape(symbols, samp, 0.5, 6);
 }
 
-// OOK调制
-VecComplex ookmod(const VecInt& bits, int samp) {
-    VecInt up = upsampleInt(bits, samp);
-    VecComplex res(up.begin(), up.end());
-    return res;
+// OOK调制（带 RRC）
+VecComplex ookmod(const VecInt& bits, int samp)
+{
+    if (bits.empty() || samp <= 0) return {};
+
+    VecComplex symbols;
+    symbols.reserve(bits.size());
+
+    for (int b : bits) {
+        symbols.emplace_back((double)b, 0.0);
+    }
+
+    return rrcPulseShape(symbols, samp, 0.5, 6);
 }
 
 // 连续相位 2FSK 调制
@@ -139,17 +206,6 @@ VecComplex fskmod(const VecInt& bits, int M, double deta_f, int samp, double fs)
 }
 
 // FM调制（严格对齐 MATLAB）
-// 对应 MATLAB:
-// encoded_msg = d_encode(bits);
-// bipolar = 2*encoded_msg - 1;
-// rcos_fir = rcosdesign(0.5, 6, samp, 'sqrt');
-// filter_delay = (length(rcos_fir)-1)/2;
-// up = upsample(bipolar, samp);
-// up = [up, zeros(1, filter_delay)];
-// m = filter(rcos_fir, 1, up);
-// m = m(filter_delay+1:end);
-// phi = 2*pi*kf*cumsum(m)/fs;
-// txSig = exp(1j*phi).';
 VecComplex fmmod(const VecInt& bits, int samp, double fs, double kf)
 {
     if (bits.empty() || samp <= 0 || fs <= 0.0) return {};
@@ -175,27 +231,16 @@ VecComplex fmmod(const VecInt& bits, int samp, double fs, double kf)
         up_bipolar_msg_source[i * (size_t)samp] = bipolar_msg_source[i];
     }
 
-    // 5) MATLAB: up_bipolar_msg_source = [up_bipolar_msg_source, zeros(1, filter_delay)];
+    // 5) MATLAB: up = [up, zeros(1, filter_delay)];
     up_bipolar_msg_source.insert(up_bipolar_msg_source.end(), (size_t)filter_delay, 0.0);
 
-    // 6) MATLAB 的 filter(rcos_fir, 1, x)
-    // 输出长度与输入长度相同，是“因果 FIR”滤波
-    VecDouble m(up_bipolar_msg_source.size(), 0.0);
-    for (size_t n = 0; n < up_bipolar_msg_source.size(); ++n) {
-        double acc = 0.0;
-        for (size_t k = 0; k < rcos_fir.size(); ++k) {
-            if (n >= k) {
-                acc += rcos_fir[k] * up_bipolar_msg_source[n - k];
-            }
-        }
-        m[n] = acc;
-    }
+    // 6) MATLAB 风格 FIR
+    VecDouble m = firFilterSameLength(rcos_fir, up_bipolar_msg_source);
 
-    // 7) MATLAB: m = m(filter_delay+1:end);
+    // 7) MATLAB: m = m(filter_delay+1:end)
     if (m.size() <= (size_t)filter_delay) return {};
     VecDouble m_aligned(m.begin() + filter_delay, m.end());
 
-    // 现在长度应为 bits.size() * samp
     // 8) FM 调制：phi = 2*pi*kf*cumsum(m)/fs
     VecComplex txSig;
     txSig.reserve(m_aligned.size());

@@ -7,11 +7,11 @@ int main()
     {
         TestResult tr = run_one_test(
             RunMode::AWGN,          // AWGN 信道
-            0.0,                   // SNR（你可以改，比如 -10 ~ 10）
-            100,                    // 重复帧数（越大越准，建议 >=100）
+            -5.0,                   // SNR（你可以改，比如 -10 ~ 10）
+            200,                    // 重复帧数（越大越准，建议 >=100）
             2.45e9,                 // 中心频率（AWGN下无影响）
-            ModulationType::FM,     // 调制方式（你现在重点测这个）
-            1024000,
+            ModulationType::QAM,     // 调制方式（你现在重点测这个）
+            50000,
             1
         );
 

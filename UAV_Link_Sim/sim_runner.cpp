@@ -276,7 +276,8 @@ static void build_waveform_from_signal(
         return;
     }
 
-    bool useEnvelope = (modulation == ModulationType::FM);
+    bool useEnvelope = 0;
+    //bool useEnvelope = (modulation == ModulationType::FM || modulation == ModulationType::MSK);
     out_type = useEnvelope ? WaveformType::ENVELOPE : WaveformType::REAL;
 
     out_waveform.reserve(sig_mid.size());

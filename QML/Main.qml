@@ -686,7 +686,7 @@ ApplicationWindow {
                             Label { text: "调制方式"; font.pixelSize: 15 }
                             ComboBox {
                                 Layout.preferredWidth: 130
-                                model: ["MSK", "BPSK", "QPSK", "QAM", "OOK", "FSK"]
+                                model: ["MSK", "BPSK", "QPSK", "QAM", "OOK", "FSK", "FM"]
                                 currentIndex: Math.max(0, model.indexOf(backend.selectedMode))
                                 onActivated: backend.selectedMode = currentText
                             }

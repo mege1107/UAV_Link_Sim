@@ -282,6 +282,7 @@ VecComplex Transmitter::buildRemoteControlPulse(
 
 VecComplex Transmitter::generateTransmitSignal() {
     last_pure_modulated_signal_.clear();
+
     // 1. 信源
     if (config_.source_mode == SourceMode::FileBits) {
         last_source_bits_ = generateFileSourceBits();
@@ -359,14 +360,10 @@ VecComplex Transmitter::generateTransmitSignal() {
             txSig = bpskmod(diff, config_.samp);
         }
         else if (config_.modulation == ModulationType::QPSK) {
-            double fs_local = config_.fs;
-            txSig = qpskmod(ccsk_msg, config_.samp, fs_local);
-            config_.fs = fs_local;
+            txSig = qpskmod(ccsk_msg, config_.samp);
         }
         else if (config_.modulation == ModulationType::QAM) {
-            double fs_local = config_.fs;
-            txSig = qammod(ccsk_msg, config_.samp, fs_local);
-            config_.fs = fs_local;
+            txSig = qammod(ccsk_msg, config_.samp);
         }
         else if (config_.modulation == ModulationType::OOK) {
             txSig = ookmod(ccsk_msg, config_.samp);

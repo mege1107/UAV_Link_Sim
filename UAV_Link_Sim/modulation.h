@@ -9,10 +9,10 @@ VecComplex mskmod(const VecInt& bits, int samp);
 VecComplex bpskmod(const VecInt& bits, int samp);
 
 // QPSK调制 (会修改fs为fs/2)
-VecComplex qpskmod(const VecInt& bits, int samp, double& fs);
+VecComplex qpskmod(const VecInt& bits, int samp);
 
 // 16QAM调制 (会修改fs为fs/4)
-VecComplex qammod(const VecInt& bits, int samp, double& fs);
+VecComplex qammod(const VecInt& bits, int samp);
 
 // OOK调制
 VecComplex ookmod(const VecInt& bits, int samp);

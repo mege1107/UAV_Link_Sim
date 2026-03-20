@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <random>
+#include <cmath>
 
 static std::mt19937 rng;
 
