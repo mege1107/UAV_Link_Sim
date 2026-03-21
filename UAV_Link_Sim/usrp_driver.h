@@ -1,4 +1,5 @@
 #pragma once
+
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/stream.hpp>
 #include <atomic>
@@ -15,12 +16,21 @@ class USRPDriver {
 public:
     struct Config {
         std::string device_args = "type=b200";
+
         double sample_rate = 2e6;
         double center_freq = 2.45e9;
         double tx_gain = 30.0;
         double rx_gain = 30.0;
+
         std::string tx_antenna = "TX/RX";
         std::string rx_antenna = "RX2";
+
+        // ¸ø X310 Ô¤Áô
+        std::string tx_subdev;
+        std::string rx_subdev;
+        std::string clock_source;
+        std::string time_source;
+
         double recv_timeout = 0.1;
     };
 
@@ -33,7 +43,6 @@ public:
 
     size_t send_burst(const VecComplex& samples);
 
-    // ===== Ë«Ïß³Ì RX =====
     void start_rx_worker(size_t target_samps);
     void stop_rx_worker();
     void wait_rx_worker();

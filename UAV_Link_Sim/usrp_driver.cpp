@@ -18,6 +18,19 @@ USRPDriver::~USRPDriver() {
 void USRPDriver::init() {
     usrp_ = uhd::usrp::multi_usrp::make(cfg_.device_args);
 
+    if (!cfg_.clock_source.empty()) {
+        usrp_->set_clock_source(cfg_.clock_source);
+    }
+    if (!cfg_.time_source.empty()) {
+        usrp_->set_time_source(cfg_.time_source);
+    }
+    if (!cfg_.tx_subdev.empty()) {
+        usrp_->set_tx_subdev_spec(cfg_.tx_subdev);
+    }
+    if (!cfg_.rx_subdev.empty()) {
+        usrp_->set_rx_subdev_spec(cfg_.rx_subdev);
+    }
+
     usrp_->set_rx_rate(cfg_.sample_rate);
     usrp_->set_tx_rate(cfg_.sample_rate);
 
@@ -27,8 +40,12 @@ void USRPDriver::init() {
     usrp_->set_rx_gain(cfg_.rx_gain);
     usrp_->set_tx_gain(cfg_.tx_gain);
 
-    usrp_->set_rx_antenna(cfg_.rx_antenna);
-    usrp_->set_tx_antenna(cfg_.tx_antenna);
+    if (!cfg_.rx_antenna.empty()) {
+        usrp_->set_rx_antenna(cfg_.rx_antenna);
+    }
+    if (!cfg_.tx_antenna.empty()) {
+        usrp_->set_tx_antenna(cfg_.tx_antenna);
+    }
 
     uhd::stream_args_t tx_args("fc32", "sc16");
     uhd::stream_args_t rx_args("fc32", "sc16");
@@ -76,7 +93,6 @@ size_t USRPDriver::send_burst(const VecComplex& samples) {
         sent_total += n;
     }
 
-    // 显式 EOB
     uhd::tx_metadata_t md_eob;
     md_eob.start_of_burst = false;
     md_eob.end_of_burst = true;
@@ -122,7 +138,6 @@ VecComplex USRPDriver::fetch_rx_buffer() {
 
 void USRPDriver::rx_worker_loop(size_t target_samps) {
     try {
-        // 连续接收模式
         uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
         cmd.stream_now = true;
         cmd.num_samps = 0;
@@ -133,6 +148,7 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
         uhd::rx_metadata_t md;
 
         size_t recv_total = 0;
+        int overflow_count = 0;
 
         while (!rx_stop_flag_ && recv_total < target_samps) {
             size_t want = std::min(max_samps, target_samps - recv_total);
@@ -144,8 +160,13 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
             }
 
             if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
-                std::cerr << "[UHD][RX] Overflow\n";
-                break;
+                ++overflow_count;
+                std::cerr << "[UHD][RX] Overflow count = " << overflow_count << "\n";
+                if (overflow_count >= 5) {
+                    std::cerr << "[UHD][RX] Too many overflows, stop RX\n";
+                    break;
+                }
+                continue;
             }
 
             if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
@@ -165,7 +186,6 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
             }
         }
 
-        // 停止连续接收
         uhd::stream_cmd_t stop_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
         rx_stream_->issue_stream_cmd(stop_cmd);
     }

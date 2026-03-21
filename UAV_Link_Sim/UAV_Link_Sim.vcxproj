@@ -135,6 +135,7 @@
     <ClInclude Include="modulation.h" />
     <ClInclude Include="radio_if.h" />
     <ClInclude Include="receiver.h" />
+    <ClInclude Include="role_runner.h" />
     <ClInclude Include="sim_runner.h" />
     <ClInclude Include="spread_spectrum.h" />
     <ClInclude Include="sync.h" />
@@ -159,6 +160,7 @@
     <ClCompile Include="transmitter.cpp" />
     <ClCompile Include="usrp_driver.cpp" />
     <ClCompile Include="utils.cpp" />
+    <ClCompile Include="role_runner.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
