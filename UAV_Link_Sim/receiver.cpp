@@ -2,7 +2,6 @@
 #include "coding.h"
 #include "spread_spectrum.h"
 #include "sync.h"
-#include "channel.h"
 #include "utils.h"
 
 #include <cmath>
@@ -17,6 +16,7 @@ static inline Complex cexpj(double a) {
 
 namespace {
     int g_linear_decision_phase = 0;
+    constexpr bool kEnableDebugLogs = false;
 }
 
 // =============== 一些本地辅助函数 ===============
@@ -730,11 +730,13 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
     const int single_frame_total_samp = sync_len + payload_samp_num + zp_samp_num;
 
-    std::cout << "[DBG] ccsk_chip_num=" << ccsk_chip_num
-        << " total_pulses=" << total_pulses_dbg
-        << " payload_samp_num=" << payload_samp_num
-        << " single_frame_total_samp=" << single_frame_total_samp
-        << "\n";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG] ccsk_chip_num=" << ccsk_chip_num
+            << " total_pulses=" << total_pulses_dbg
+            << " payload_samp_num=" << payload_samp_num
+            << " single_frame_total_samp=" << single_frame_total_samp
+            << "\n";
+    }
 
     if (rx_signal.size() < (size_t)single_frame_total_samp) {
         std::cerr << "[Receiver] Signal length insufficient for one frame, cannot demodulate\n";
@@ -775,15 +777,17 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         rx_sync_signal = applyFrequencyCorrection(rx_signal, fs, coarse_cfo_hz);
     }
 
-    std::cout << "[DBG][ACQ_CFO] coarse_block_len=" << coarse_block_len
-        << " coarse_cfo_start=" << coarse_cfo_start
-        << " coarse_cfo_score=" << coarse_cfo_score
-        << " coarse_cfo_hz_aliased=" << coarse_cfo_hz_aliased
-        << " coarse_cfo_branch_k=" << cfo_branch.branch_k
-        << " coarse_cfo_branch_metric=" << cfo_branch.branch_metric
-        << " coarse_cfo_hz_resolved=" << coarse_cfo_hz
-        << " sync_input=" << ((std::abs(coarse_cfo_hz) >= 1.0) ? "pre_corrected" : "raw")
-        << "\n";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG][ACQ_CFO] coarse_block_len=" << coarse_block_len
+            << " coarse_cfo_start=" << coarse_cfo_start
+            << " coarse_cfo_score=" << coarse_cfo_score
+            << " coarse_cfo_hz_aliased=" << coarse_cfo_hz_aliased
+            << " coarse_cfo_branch_k=" << cfo_branch.branch_k
+            << " coarse_cfo_branch_metric=" << cfo_branch.branch_metric
+            << " coarse_cfo_hz_resolved=" << coarse_cfo_hz
+            << " sync_input=" << ((std::abs(coarse_cfo_hz) >= 1.0) ? "pre_corrected" : "raw")
+            << "\n";
+    }
 
     bool first_found_candidate = false;
     size_t first_cand_idx = 0;
@@ -819,18 +823,18 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         return {};
     }
 
-    std::cout << "[DBG][STO] estimated_sto_samp=" << estimated_sto_samp
-        << " first_cand_idx=" << first_cand_idx
-        << " first_metric=" << first_best_m
-        << "\n";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG][STO] estimated_sto_samp=" << estimated_sto_samp
+            << " first_cand_idx=" << first_cand_idx
+            << " first_metric=" << first_best_m
+            << "\n";
+    }
 
     VecComplex rx_aligned_signal = shiftSignalLeftWithZeroPad(rx_sync_signal, estimated_sto_samp);
 
     VecInt total_rx_bits;
     size_t current_offset = 0;
     const size_t total_rx_len = rx_aligned_signal.size();
-    double sfo_hat_ppm = 0.0;
-    int sfo_track_count = 0;
 
     while (current_offset + (size_t)single_frame_total_samp <= total_rx_len) {
 
@@ -858,9 +862,11 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         if (frame_count_ == 0) {
-            std::cout << "[DBG][FIRST] aligned_sync_abs_start=" << sync_abs_start
-                << " metric=" << sync_metric
-                << "\n";
+            if (kEnableDebugLogs) {
+                std::cout << "[DBG][FIRST] aligned_sync_abs_start=" << sync_abs_start
+                    << " metric=" << sync_metric
+                    << "\n";
+            }
         }
 
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
@@ -869,27 +875,12 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             break;
         }
 
-        std::cout << "[DBG] current_offset=" << current_offset
-            << " sync_abs_start=" << sync_abs_start
-            << " drift=" << (long long)sync_abs_start - (long long)current_offset
-            << " metric=" << sync_metric
-            << "\n";
-
-        if (frame_count_ > 0 && sync_abs_start > 0) {
-            const double nominal_start = (double)frame_count_ * (double)single_frame_total_samp;
-            const double cumulative_drift = (double)sync_abs_start - nominal_start;
-            const double sfo_inst_ppm = (nominal_start > 1.0)
-                ? (cumulative_drift / nominal_start) * 1e6
-                : 0.0;
-            const double sfo_inst_ppm_clamped = clamp_value(sfo_inst_ppm, -200.0, 200.0);
-
-            if (sfo_track_count == 0) {
-                sfo_hat_ppm = sfo_inst_ppm_clamped;
-            }
-            else {
-                sfo_hat_ppm = 0.8 * sfo_hat_ppm + 0.2 * sfo_inst_ppm_clamped;
-            }
-            sfo_track_count++;
+        if (kEnableDebugLogs) {
+            std::cout << "[DBG] current_offset=" << current_offset
+                << " sync_abs_start=" << sync_abs_start
+                << " drift=" << (long long)sync_abs_start - (long long)current_offset
+                << " metric=" << sync_metric
+                << "\n";
         }
 
         VecComplex current_frame(rx_aligned_signal.begin() + sync_abs_start,
@@ -960,16 +951,18 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             for (auto& v : current_frame) v *= ph_rot;
         }
 
-        std::cout << "[DBG][CFO] frame=" << frame_count_
-            << " coarse_cfo_hz=" << coarse_cfo_hz
-            << " residual_cfo_hz=" << frame_freq_offset
-            << " residual_cfo_fit_hz=" << f_hat
-            << " total_cfo_est_hz=" << total_cfo_est_hz
-            << " total_cfo_fit_hz=" << total_cfo_fit_hz
-            << " applied_residual_cfo_hz=" << f_use
-            << " cfo_deadband_hz=" << cfo_deadband_hz
-            << " residual_phase=" << residual_phase
-            << "\n";
+        if (kEnableDebugLogs) {
+            std::cout << "[DBG][CFO] frame=" << frame_count_
+                << " coarse_cfo_hz=" << coarse_cfo_hz
+                << " residual_cfo_hz=" << frame_freq_offset
+                << " residual_cfo_fit_hz=" << f_hat
+                << " total_cfo_est_hz=" << total_cfo_est_hz
+                << " total_cfo_fit_hz=" << total_cfo_fit_hz
+                << " applied_residual_cfo_hz=" << f_use
+                << " cfo_deadband_hz=" << cfo_deadband_hz
+                << " residual_phase=" << residual_phase
+                << "\n";
+        }
 
         // ====== 提取 payload（去掉 sync 和尾部 ZP） ======
         const size_t payload_start = (size_t)sync_len;
@@ -1013,7 +1006,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
             payload_sig.swap(depulsed);
 
-            std::cout << "[DBG] depulsed payload samples=" << payload_sig.size() << "\n";
+            if (kEnableDebugLogs) {
+                std::cout << "[DBG] depulsed payload samples=" << payload_sig.size() << "\n";
+            }
         }
         else {
             // 对带 RRC 的线性调制：低通 + SRRC 匹配滤波
@@ -1031,30 +1026,15 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             }
         }
 
-        if (std::abs(sfo_hat_ppm) > 0.01 &&
-            (config_.modulation == ModulationType::BPSK ||
-                config_.modulation == ModulationType::QPSK ||
-                config_.modulation == ModulationType::QAM ||
-                config_.modulation == ModulationType::OOK)) {
-            payload_sig = Channel::applySFO(payload_sig, -sfo_hat_ppm);
-        }
+        g_linear_decision_phase = 0;
 
-        if (config_.modulation == ModulationType::BPSK ||
-            config_.modulation == ModulationType::QPSK ||
-            config_.modulation == ModulationType::QAM ||
-            config_.modulation == ModulationType::OOK) {
-            g_linear_decision_phase = chooseBestLinearDecisionPhase(payload_sig, s);
+        if (kEnableDebugLogs) {
+            std::cout << "[DBG][TIMING] frame=" << frame_count_
+                << " sync_refine_win=[" << win_start << "," << win_end << ")"
+                << " best_sync_start=" << sync_abs_start
+                << " decision_phase=" << g_linear_decision_phase
+                << "\n";
         }
-        else {
-            g_linear_decision_phase = 0;
-        }
-
-        std::cout << "[DBG][TIMING] frame=" << frame_count_
-            << " sync_refine_win=[" << win_start << "," << win_end << ")"
-            << " best_sync_start=" << sync_abs_start
-            << " decision_phase=" << g_linear_decision_phase
-            << " sfo_hat_ppm=" << sfo_hat_ppm
-            << "\n";
 
         // ====== 保存星座图点（取最后一次成功锁帧的 payload） ======
         buildConstellationPoints(payload_sig);
@@ -1098,7 +1078,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             break;
         }
 
-        std::cout << "[DBG][RX] ccsk_decoded bits = " << rx_encoded_bits.size() << "\n";
+        if (kEnableDebugLogs) {
+            std::cout << "[DBG][RX] ccsk_decoded bits = " << rx_encoded_bits.size() << "\n";
+        }
 
         VecInt rx_source_bits = HXL_RSDecode(rx_encoded_bits, 31, 15);
         if (rx_source_bits.empty()) {
@@ -1116,10 +1098,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             << ", demodulated bits: " << rx_source_bits.size()
             << "\n";
 
-        const double sfo_scale = 1.0 + sfo_hat_ppm * 1e-6;
-        long long next_step = (long long)std::llround((double)single_frame_total_samp * sfo_scale);
-        if (next_step <= 0) next_step = single_frame_total_samp;
-        current_offset = sync_abs_start + (size_t)next_step;
+        current_offset = frame_abs_end;
     }
 
     return total_rx_bits;

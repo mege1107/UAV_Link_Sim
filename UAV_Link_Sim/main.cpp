@@ -1,5 +1,6 @@
 #include <iostream>
 #include <iomanip>
+#include <vector>
 
 #include "sim_runner.h"
 #include "channel.h"
@@ -8,52 +9,71 @@ int main()
 {
     try
     {
-        std::cout << "============================\n";
-        std::cout << "  CUSTOM CHANNEL TEST\n";
-        std::cout << "============================\n";
+        std::cout << "========================================\n";
+        std::cout << "  CUSTOM CHANNEL COMBINATION SWEEP\n";
+        std::cout << "========================================\n";
 
-        // ===== 基本参数 =====
-        double snr_db = 20.0;
-        int tx_frames = 10;
-        double fc = 2.45e9;
-        double rate = 50000;
-        int hop = 1;
+        const double snr_db = 20.0;
+        const int tx_frames = 200;
+        const double fc = 2.45e9;
+        const double rate = 50000.0;
+        const int hop = 1;
 
-        ModulationType mod = ModulationType::QPSK;
+        const std::vector<ModulationType> mods = {
+            ModulationType::QPSK,
+            ModulationType::FSK,
+            ModulationType::OOK,
+            ModulationType::BPSK,
+            ModulationType::QAM,
+            ModulationType::FM,
+            ModulationType::MSK
+        };
+        const std::vector<int> stos = { 10000, 100000 };
+        const std::vector<double> cfos = { 9000.0, 12000.0 };
+        const std::vector<double> sfos = { 5.0 };
 
-        ChannelConfig ch;
-        ch.enable_awgn = true;
-        ch.snr_dB = snr_db;
-        ch.seed = 123;
+        for (ModulationType mod : mods) {
+            for (int sto : stos) {
+                for (double cfo : cfos) {
+                    for (double sfo : sfos) {
+                        ChannelConfig ch;
+                        ch.enable_awgn = true;
+                        ch.snr_dB = snr_db;
+                        ch.seed = 123;
 
-        ch.enable_sto = true;
-        ch.sto_samp = 0;
+                        ch.enable_sto = true;
+                        ch.sto_samp = sto;
 
-        ch.enable_cfo = true;
-        ch.cfo_hz = 0;
+                        ch.enable_cfo = true;
+                        ch.cfo_hz = cfo;
 
-        ch.enable_sfo = true;
-        ch.sfo_ppm = 2.0;
+                        ch.enable_sfo = true;
+                        ch.sfo_ppm = sfo;
 
-        auto result = run_channel_test(
-            snr_db,
-            tx_frames,
-            fc,
-            mod,
-            rate,
-            hop,
-            ch
-        );
+                        TestResult result = run_channel_test(
+                            snr_db,
+                            tx_frames,
+                            fc,
+                            mod,
+                            rate,
+                            hop,
+                            ch
+                        );
 
-        std::cout << std::fixed << std::setprecision(3)
-            << "STO=" << ch.sto_samp << " samp"
-            << " | CFO=" << ch.cfo_hz << " Hz"
-            << " | SFO=" << ch.sfo_ppm << " ppm"
-            << " | Frames=" << tx_frames
-            << " | BER=" << std::scientific << std::setprecision(6) << result.total_ber
-            << std::fixed << " | bit_errors=" << result.total_bit_errors
-            << " | compared_bits=" << result.total_compared_bits
-            << " | decoded_frames=" << result.decoded_frames << "\n";
+                        std::cout << modulation_to_string(mod)
+                            << " | STO=" << ch.sto_samp << " samp"
+                            << " | CFO=" << std::fixed << std::setprecision(3) << ch.cfo_hz << " Hz"
+                            << " | SFO=" << ch.sfo_ppm << " ppm"
+                            << " | Frames=" << tx_frames
+                            << " | BER=" << std::scientific << std::setprecision(6) << result.total_ber
+                            << std::fixed << " | bit_errors=" << result.total_bit_errors
+                            << " | compared_bits=" << result.total_compared_bits
+                            << " | decoded_frames=" << result.decoded_frames
+                            << "\n";
+                    }
+                }
+            }
+        }
     }
     catch (const std::exception& e)
     {

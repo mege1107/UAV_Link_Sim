@@ -7,6 +7,10 @@
 #include <cmath>
 #include <cctype>
 
+namespace {
+    constexpr bool kEnableDebugLogs = false;
+}
+
 Transmitter::Transmitter(const TransmitterConfig& config) : config_(config) {
     calculateFS();
     setRandomSeed(1); // 对应 MATLAB rng(1)
@@ -306,8 +310,10 @@ VecComplex Transmitter::generateTransmitSignal() {
         encoded_msg.insert(encoded_msg.end(), enc.begin(), enc.end());
     }
 
-    std::cout << "[DBG][TX] source bits = " << dataIn.size() << "\n";
-    std::cout << "[DBG][TX] RS encoded bits = " << encoded_msg.size() << "\n";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG][TX] source bits = " << dataIn.size() << "\n";
+        std::cout << "[DBG][TX] RS encoded bits = " << encoded_msg.size() << "\n";
+    }
 
     // 3. CCSK (32,5) 扩频
     VecInt ccsk_msg = ZCY_CCSK32(encoded_msg, config_.ccskcode);

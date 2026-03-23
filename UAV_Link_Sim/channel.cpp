@@ -2,33 +2,11 @@
 
 #include <random>
 #include <algorithm>
-#include <cmath>
 
 namespace {
     static std::mt19937& rng() {
         static std::mt19937 gen(123);
         return gen;
-    }
-
-    static Complex sample_clamped(const VecComplex& signal, long long idx) {
-        if (signal.empty()) return Complex(0.0, 0.0);
-        if (idx <= 0) return signal.front();
-        if (static_cast<size_t>(idx) >= signal.size()) return signal.back();
-        return signal[static_cast<size_t>(idx)];
-    }
-
-    static Complex cubic_interp(
-        const Complex& y0,
-        const Complex& y1,
-        const Complex& y2,
-        const Complex& y3,
-        double mu)
-    {
-        const Complex a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
-        const Complex a1 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
-        const Complex a2 = -0.5 * y0 + 0.5 * y2;
-        const Complex a3 = y1;
-        return ((a0 * mu + a1) * mu + a2) * mu + a3;
     }
 }
 
@@ -128,17 +106,24 @@ VecComplex Channel::applySFO(const VecComplex& signal, double sfo_ppm) {
     for (size_t n = 0; n < out.size(); ++n) {
         const double src_index = static_cast<double>(n) * alpha;
 
-        const long long i1 = static_cast<long long>(std::floor(src_index));
-        const long long i0 = i1 - 1;
-        const long long i2 = i1 + 1;
-        const long long i3 = i1 + 2;
-        const double mu = src_index - static_cast<double>(i1);
+        const long long i0 = static_cast<long long>(std::floor(src_index));
+        const long long i1 = i0 + 1;
+        const double mu = src_index - static_cast<double>(i0);
 
-        const Complex s0 = sample_clamped(signal, i0);
-        const Complex s1 = sample_clamped(signal, i1);
-        const Complex s2 = sample_clamped(signal, i2);
-        const Complex s3 = sample_clamped(signal, i3);
-        out[n] = cubic_interp(s0, s1, s2, s3, mu);
+        if (i0 < 0) {
+            out[n] = Complex(0.0, 0.0);
+        }
+        else if (static_cast<size_t>(i0) >= signal.size()) {
+            out[n] = Complex(0.0, 0.0);
+        }
+        else if (static_cast<size_t>(i1) >= signal.size()) {
+            out[n] = signal[static_cast<size_t>(i0)];
+        }
+        else {
+            const Complex s0 = signal[static_cast<size_t>(i0)];
+            const Complex s1 = signal[static_cast<size_t>(i1)];
+            out[n] = (1.0 - mu) * s0 + mu * s1;
+        }
     }
 
     return out;

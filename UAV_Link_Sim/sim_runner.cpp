@@ -20,6 +20,7 @@
 #endif
 
 static constexpr bool SHOW_PURE_MSK_ONLY = true;
+static constexpr bool kEnableDebugLogs = false;
 
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
@@ -778,25 +779,27 @@ TestResult run_file_transfer_test(
     TestResult tr;
     build_constellation_result(rx.getLastConstellationPoints(), tr);
 
-    std::cout << "[DBG][TX bits first 80] ";
-    for (size_t i = 0; i < std::min<size_t>(80, tx_all_bits.size()); ++i) {
-        std::cout << tx_all_bits[i];
-    }
-    std::cout << "\n";
-
-    std::cout << "[DBG][RX bits first 80] ";
-    for (size_t i = 0; i < std::min<size_t>(80, rx_bits.size()); ++i) {
-        std::cout << rx_bits[i];
-    }
-    std::cout << "\n";
-
-    std::cout << "[DBG][BIT ERR IDX < 80] ";
-    for (size_t i = 0; i < std::min<size_t>(80, std::min(tx_all_bits.size(), rx_bits.size())); ++i) {
-        if (tx_all_bits[i] != rx_bits[i]) {
-            std::cout << i << " ";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG][TX bits first 80] ";
+        for (size_t i = 0; i < std::min<size_t>(80, tx_all_bits.size()); ++i) {
+            std::cout << tx_all_bits[i];
         }
+        std::cout << "\n";
+
+        std::cout << "[DBG][RX bits first 80] ";
+        for (size_t i = 0; i < std::min<size_t>(80, rx_bits.size()); ++i) {
+            std::cout << rx_bits[i];
+        }
+        std::cout << "\n";
+
+        std::cout << "[DBG][BIT ERR IDX < 80] ";
+        for (size_t i = 0; i < std::min<size_t>(80, std::min(tx_all_bits.size(), rx_bits.size())); ++i) {
+            if (tx_all_bits[i] != rx_bits[i]) {
+                std::cout << i << " ";
+            }
+        }
+        std::cout << "\n";
     }
-    std::cout << "\n";
 
     size_t bit_errors = 0;
     size_t total_compared_bits = std::min(tx_all_bits.size(), rx_bits.size());
@@ -811,17 +814,19 @@ TestResult run_file_transfer_test(
     std::vector<unsigned char> tx_bytes_dbg = bits_to_bytes(tx_all_bits);
     std::vector<unsigned char> rx_bytes_dbg = bits_to_bytes(rx_bits);
 
-    std::cout << "[DBG][TX bytes from tx_all_bits] ";
-    for (size_t i = 0; i < std::min<size_t>(32, tx_bytes_dbg.size()); ++i) {
-        std::cout << static_cast<int>(tx_bytes_dbg[i]) << " ";
-    }
-    std::cout << "\n";
+    if (kEnableDebugLogs) {
+        std::cout << "[DBG][TX bytes from tx_all_bits] ";
+        for (size_t i = 0; i < std::min<size_t>(32, tx_bytes_dbg.size()); ++i) {
+            std::cout << static_cast<int>(tx_bytes_dbg[i]) << " ";
+        }
+        std::cout << "\n";
 
-    std::cout << "[DBG][RX bytes from rx_bits] ";
-    for (size_t i = 0; i < std::min<size_t>(32, rx_bytes_dbg.size()); ++i) {
-        std::cout << static_cast<int>(rx_bytes_dbg[i]) << " ";
+        std::cout << "[DBG][RX bytes from rx_bits] ";
+        for (size_t i = 0; i < std::min<size_t>(32, rx_bytes_dbg.size()); ++i) {
+            std::cout << static_cast<int>(rx_bytes_dbg[i]) << " ";
+        }
+        std::cout << "\n";
     }
-    std::cout << "\n";
 
     bool save_ok = recover_file_from_bits(rx_bits, output_file_path, recovered_filename);
 
@@ -951,7 +956,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
 {
     std::ostringstream log;
 
-    // ===== OFDM ²ÎÊý =====
+    // ===== OFDM ï¿½ï¿½ï¿½ï¿½ =====
     OFDMConfig cfg;
     cfg.N_fft = 256;
     cfg.N_cp = 32;
@@ -969,11 +974,11 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
 
     TestResult tr;
 
-    // ===== Ã¿Ö¡¿É³ÐÔØµÄÔ­Ê¼ bit Êý =====
+    // ===== Ã¿Ö¡ï¿½É³ï¿½ï¿½Øµï¿½Ô­Ê¼ bit ï¿½ï¿½ =====
     auto dataPos = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
     const int dataRow = static_cast<int>(dataPos.size());
     const int codedBitsPerFrame = dataRow * cfg.Nd * static_cast<int>(std::log2(cfg.M));
-    const int uncodedBitsPerFrame = codedBitsPerFrame / 2; // 1/2 ¾í»ýÂë
+    const int uncodedBitsPerFrame = codedBitsPerFrame / 2; // 1/2 ï¿½ï¿½ï¿½ï¿½ï¿½
 
     std::mt19937 rng(1);
     std::uniform_int_distribution<int> dist01(0, 1);
@@ -981,32 +986,32 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
     size_t total_bit_errors = 0;
     size_t total_compared_bits = 0;
 
-    // Ö»±£Áô×îºóÒ»Ö¡µÄÍ¼ÐÎÊý¾Ý£¬±ÜÃâ 200 Ö¡È«Èû½øÈ¥Ì«´ó
+    // Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»Ö¡ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ 200 Ö¡È«ï¿½ï¿½ï¿½ï¿½È¥Ì«ï¿½ï¿½
     VecComplex last_eqSyms;
     VecComplex last_tx_sig;
     VecComplex last_rx_sig;
 
     for (int frm = 0; frm < kNumFrames; ++frm)
     {
-        // ===== Éú³ÉËæ»ú bit =====
+        // ===== ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ bit =====
         VecInt tx_bits;
         tx_bits.reserve(uncodedBitsPerFrame);
         for (int i = 0; i < uncodedBitsPerFrame; ++i) {
             tx_bits.push_back(dist01(rng));
         }
 
-        // ===== ·¢¶Ë£º±àÂë + QAM =====
+        // ===== ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ + QAM =====
         VecInt codedBits = OFDMUtils::convEncode_171_133(tx_bits);
         VecComplex qamSyms = OFDMUtils::qamMod(codedBits, cfg.M);
 
-        // ===== ×ÊÔ´Ó³Éä =====
+        // ===== ï¿½ï¿½Ô´Ó³ï¿½ï¿½ =====
         auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
         auto dataPos2 = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
 
         const int pilotNum = static_cast<int>(pilotPos.size());
         std::vector<std::vector<Complex>> grid(cfg.N_sc, std::vector<Complex>(cfg.Nd, Complex(0.0, 0.0)));
 
-        // Óë·¢¶ËÒ»ÖÂµÄ pilot ÐòÁÐ
+        // ï¿½ë·¢ï¿½ï¿½Ò»ï¿½Âµï¿½ pilot ï¿½ï¿½ï¿½ï¿½
         std::vector<std::vector<Complex>> pilotSeq(pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
         {
             uint32_t s = 1u;
@@ -1032,13 +1037,13 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             }
         }
 
-        // ===== OFDM µ÷ÖÆ =====
+        // ===== OFDM ï¿½ï¿½ï¿½ï¿½ =====
         VecComplex tx_data;
         for (int col = 0; col < cfg.Nd; ++col)
         {
             VecComplex X(cfg.N_fft, Complex(0.0, 0.0));
 
-            // bin0=DC, 1..N_sc ·ÅÊý¾Ý
+            // bin0=DC, 1..N_sc ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             for (int k = 0; k < cfg.N_sc; ++k) {
                 X[1 + k] = grid[k][col];
             }
@@ -1052,7 +1057,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             tx_data.insert(tx_data.end(), x.begin(), x.end());
         }
 
-        // ===== ¼ÓÇ°µ¼Áã + PSS =====
+        // ===== ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ + PSS =====
         VecComplex tx_sig;
         tx_sig.insert(tx_sig.end(), cfg.N_zeros, Complex(0.0, 0.0));
         VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
@@ -1062,7 +1067,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
         // ===== AWGN =====
         VecComplex rx_sig = Channel::awgn(tx_sig, awgn_snr_db);
 
-        // ===== ½ÓÊÕÍ¬²½ =====
+        // ===== ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ =====
         int pssPos = -1;
         {
             double best = -1.0;
@@ -1083,10 +1088,10 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             throw std::runtime_error("OFDM PSS detect failed.");
         }
 
-        // ===== ÌáÈ¡ OFDM ·ûºÅ =====
+        // ===== ï¿½ï¿½È¡ OFDM ï¿½ï¿½ï¿½ï¿½ =====
         std::vector<VecComplex> symbolsNoCP;
         {
-            // Èç¹ûºóÃæ¸ß SNR ÈÔÓÐÒì³£ÎóÂë£¬¿ÉÊÔÊÔ¸Ä³É pssPos + pss.size()
+            // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SNR ï¿½ï¿½ï¿½ï¿½ï¿½ì³£ï¿½ï¿½ï¿½ë£¬ï¿½ï¿½ï¿½ï¿½ï¿½Ô¸Ä³ï¿½ pssPos + pss.size()
             int pos0 = pssPos + static_cast<int>(pss.size()) - 1;
 
             for (int i = 0; i < cfg.Nd; ++i) {
@@ -1105,7 +1110,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             }
         }
 
-        // ===== FFT + µ¼Æµ¹À¼Æ + ¾ùºâ =====
+        // ===== FFT + ï¿½ï¿½Æµï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½ =====
         VecComplex eqSyms;
 
         for (int col = 0; col < cfg.Nd; ++col)
@@ -1132,7 +1137,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             }
         }
 
-        // ===== ½âµ÷ + ÒëÂë =====
+        // ===== ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½ =====
         VecInt rx_coded_bits = OFDMUtils::qamDemod(eqSyms, cfg.M);
         VecInt rx_bits = OFDMUtils::viterbiDecodeHard_171_133(rx_coded_bits, cfg.tblen);
 
@@ -1146,7 +1151,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
         total_bit_errors += bit_errors;
         total_compared_bits += std::min(tx_bits.size(), rx_bits.size());
 
-        // ±£´æ×îºóÒ»Ö¡ÓÃÓÚÇ°¶ËÏÔÊ¾
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»Ö¡ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½Ê¾
         if (frm == kNumFrames - 1) {
             last_eqSyms = eqSyms;
             last_tx_sig = tx_sig;
@@ -1166,7 +1171,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
         : 0.0;
     tr.decoded_frames = kNumFrames;
 
-    // ===== Í¼ÐÎÊý¾Ý£ºÖ»ÏÔÊ¾×îºóÒ»Ö¡ =====
+    // ===== Í¼ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½Ö»ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½Ò»Ö¡ =====
     build_constellation_result(last_eqSyms, tr);
 
     const VecComplex tx_sig_wave_mid = extract_center_segment(last_tx_sig, 4000);
@@ -1237,7 +1242,7 @@ TestResult run_channel_test(
 {
     std::ostringstream log;
 
-    // ===== ·¢Éä»úÅäÖÃ =====
+    // ===== ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ =====
     TransmitterConfig cfg;
 
     cfg.function =
@@ -1265,14 +1270,14 @@ TestResult run_channel_test(
 
     Receiver rx(cfg);
 
-    // ===== ¹¹Ôì burst =====
+    // ===== ï¿½ï¿½ï¿½ï¿½ burst =====
     VecComplex tx_burst;
     for (int i = 0; i < tx_repeat_frames; ++i) {
         tx_burst.insert(tx_burst.end(), one_frame_sig.begin(), one_frame_sig.end());
     }
 
-    // ===== ÐÂÐÅµÀÈë¿Ú =====
-    // ¶ÔÕý STO ³¡¾°×·¼ÓÎ²±£»¤£¬±ÜÃâÓÐÏÞ³¤ burst ±»Ç°²¹Áãºó½Ø¶ÏÎóÉË×îºó¼¸Ö¡
+    // ===== ï¿½ï¿½ï¿½Åµï¿½ï¿½ï¿½ï¿½ =====
+    // ï¿½ï¿½ï¿½ï¿½ STO ï¿½ï¿½ï¿½ï¿½×·ï¿½ï¿½Î²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ³ï¿½ burst ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¡
     if (ch_cfg.enable_sto && ch_cfg.sto_samp > 0) {
         const size_t tail_guard = static_cast<size_t>(ch_cfg.sto_samp) + one_frame_sig.size();
         tx_burst.insert(tx_burst.end(), tail_guard, Complex(0.0, 0.0));
@@ -1287,7 +1292,7 @@ TestResult run_channel_test(
         throw std::runtime_error("rx_sig is empty.");
     }
 
-    // ===== ½ÓÊÕ =====
+    // ===== ï¿½ï¿½ï¿½ï¿½ =====
     VecInt rx_bits = rx.receive(rx_sig);
 
     TestResult tr;
@@ -1324,7 +1329,7 @@ TestResult run_channel_test(
         (double)total_bit_errors / (double)total_compared_bits :
         0.0;
 
-    // ===== ²¨ÐÎ/ÆµÆ× =====
+    // ===== ï¿½ï¿½ï¿½ï¿½/Æµï¿½ï¿½ =====
     {
         const VecComplex& tx_sig_full = tx.getLastPureModulatedSignal();
 
@@ -1347,7 +1352,7 @@ TestResult run_channel_test(
             tr.rx_spectrum_freq, tr.rx_spectrum_mag);
     }
 
-    // ===== ÈÕÖ¾ =====
+    // ===== ï¿½ï¿½Ö¾ =====
     log << "========== CUSTOM CHANNEL TEST ==========\n";
     log << "[MOD] " << modulation_to_string(modulation) << "\n";
     log << "[SNR] " << snr_db << " dB\n";
