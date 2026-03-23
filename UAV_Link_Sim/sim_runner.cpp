@@ -1272,6 +1272,12 @@ TestResult run_channel_test(
     }
 
     // ===== 新信道入口 =====
+    // 对正 STO 场景追加尾保护，避免有限长 burst 被前补零后截断误伤最后几帧
+    if (ch_cfg.enable_sto && ch_cfg.sto_samp > 0) {
+        const size_t tail_guard = static_cast<size_t>(ch_cfg.sto_samp) + one_frame_sig.size();
+        tx_burst.insert(tx_burst.end(), tail_guard, Complex(0.0, 0.0));
+    }
+
     ChannelConfig cfg_local = ch_cfg;
     cfg_local.snr_dB = snr_db;
 

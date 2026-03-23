@@ -2,6 +2,7 @@
 #include "coding.h"
 #include "spread_spectrum.h"
 #include "sync.h"
+#include "channel.h"
 #include "utils.h"
 
 #include <cmath>
@@ -12,6 +13,10 @@
 
 static inline Complex cexpj(double a) {
     return Complex(std::cos(a), std::sin(a));
+}
+
+namespace {
+    int g_linear_decision_phase = 0;
 }
 
 // =============== 一些本地辅助函数 ===============
@@ -260,6 +265,216 @@ static bool findSyncStartNormalizedWindow(
     return best_metric > 0.0;
 }
 
+static double estimateCoarseCFOFromRepeatedSync(
+    const VecComplex& rx,
+    size_t coarse_block_len,
+    int repeat_count,
+    double fs,
+    size_t& best_start,
+    double& best_score)
+{
+    best_start = 0;
+    best_score = 0.0;
+
+    if (rx.empty() || coarse_block_len == 0 || repeat_count < 2) return 0.0;
+    if (!std::isfinite(fs) || fs <= 0.0) return 0.0;
+
+    const size_t span = coarse_block_len * (size_t)repeat_count;
+    if (span > rx.size()) return 0.0;
+
+    Complex best_acc(0.0, 0.0);
+    const size_t last_start = rx.size() - span;
+
+    for (size_t start = 0; start <= last_start; ++start) {
+        Complex acc(0.0, 0.0);
+        double energy = 0.0;
+
+        for (int rep = 0; rep < repeat_count - 1; ++rep) {
+            const size_t a0 = start + (size_t)rep * coarse_block_len;
+            const size_t b0 = a0 + coarse_block_len;
+            for (size_t k = 0; k < coarse_block_len; ++k) {
+                const Complex& a = rx[a0 + k];
+                const Complex& b = rx[b0 + k];
+                acc += std::conj(a) * b;
+                energy += std::norm(a) + std::norm(b);
+            }
+        }
+
+        if (energy <= 1e-12) continue;
+
+        const double score = std::abs(acc) / energy;
+        if (score > best_score) {
+            best_score = score;
+            best_start = start;
+            best_acc = acc;
+        }
+    }
+
+    if (best_score <= 0.0) return 0.0;
+
+    const double phase = std::atan2(best_acc.imag(), best_acc.real());
+    const double delta_t = (double)coarse_block_len / fs;
+    if (!std::isfinite(delta_t) || delta_t <= 0.0) return 0.0;
+
+    double f_coarse = phase / (2.0 * PI * delta_t);
+    const double max_freq_offset = fs / (2.0 * (double)coarse_block_len);
+    f_coarse = clamp_value(f_coarse, -max_freq_offset, max_freq_offset);
+
+    if (!std::isfinite(f_coarse)) return 0.0;
+    return f_coarse;
+}
+
+static VecComplex applyFrequencyCorrection(
+    const VecComplex& signal,
+    double fs,
+    double freq_hz)
+{
+    if (signal.empty()) return {};
+    if (!std::isfinite(fs) || fs <= 0.0) return signal;
+    if (!std::isfinite(freq_hz) || std::abs(freq_hz) < 1e-12) return signal;
+
+    VecComplex out(signal.size());
+    for (size_t n = 0; n < signal.size(); ++n) {
+        const double ang = 2.0 * PI * freq_hz * (double)n / fs;
+        out[n] = signal[n] * std::conj(cexpj(ang));
+    }
+    return out;
+}
+
+static VecComplex shiftSignalLeftWithZeroPad(
+    const VecComplex& signal,
+    size_t shift_samp)
+{
+    if (signal.empty() || shift_samp == 0) return signal;
+
+    VecComplex out(signal.size(), Complex(0.0, 0.0));
+    if (shift_samp >= signal.size()) return out;
+
+    const size_t remain = signal.size() - shift_samp;
+    for (size_t i = 0; i < remain; ++i) {
+        out[i] = signal[i + shift_samp];
+    }
+    return out;
+}
+
+static int chooseBestLinearDecisionPhase(
+    const VecComplex& rx,
+    int s)
+{
+    if (rx.empty() || s <= 1) return 0;
+
+    int best_phase = 0;
+    double best_score = -1.0;
+
+    for (int phase = 0; phase < s; ++phase) {
+        double score = 0.0;
+        int count = 0;
+
+        for (size_t idx = (size_t)phase; idx < rx.size(); idx += (size_t)s) {
+            score += std::norm(rx[idx]);
+            count++;
+        }
+
+        if (count > 0) score /= (double)count;
+        if (score > best_score) {
+            best_score = score;
+            best_phase = phase;
+        }
+    }
+
+    return best_phase;
+}
+
+static VecComplex sampleLinearSymbolsAtPhase(
+    const VecComplex& rx,
+    int s,
+    int phase)
+{
+    VecComplex syms;
+    if (rx.empty() || s <= 0) return syms;
+    if (phase < 0) phase = 0;
+    if (phase >= s) phase = s - 1;
+    if ((size_t)phase >= rx.size()) return syms;
+
+    syms.reserve((rx.size() + (size_t)s - 1) / (size_t)s);
+    for (size_t idx = (size_t)phase; idx < rx.size(); idx += (size_t)s) {
+        syms.push_back(rx[idx]);
+    }
+    return syms;
+}
+
+struct CFOBranchResolveResult {
+    double resolved_cfo_hz = 0.0;
+    double branch_metric = -1.0;
+    size_t first_candidate_idx = 0;
+    int branch_k = 0;
+    VecComplex corrected_signal;
+};
+
+static CFOBranchResolveResult resolveCoarseCFOAmbiguity(
+    const VecComplex& rx,
+    const VecComplex& sync,
+    double coarse_cfo_hz,
+    double fs,
+    size_t coarse_block_len,
+    double first_sync_threshold,
+    size_t first_refine_W)
+{
+    CFOBranchResolveResult best;
+    best.resolved_cfo_hz = coarse_cfo_hz;
+    best.corrected_signal = rx;
+
+    if (rx.empty() || sync.empty() || coarse_block_len == 0) return best;
+    if (!std::isfinite(fs) || fs <= 0.0) return best;
+
+    const double ambiguity_step_hz = fs / (double)coarse_block_len;
+    const int branch_candidates[] = { -1, 0, 1 };
+
+    for (int k : branch_candidates) {
+        const double cand_cfo_hz = coarse_cfo_hz + (double)k * ambiguity_step_hz;
+        VecComplex cand_signal = applyFrequencyCorrection(rx, fs, cand_cfo_hz);
+
+        bool found_candidate = false;
+        size_t cand_idx = 0;
+        const size_t search_end = cand_signal.size() - sync.size();
+        for (size_t i = 0; i <= search_end; ++i) {
+            double m = metricAtNormalized(cand_signal, i, sync);
+            if (m >= first_sync_threshold) {
+                cand_idx = i;
+                found_candidate = true;
+                break;
+            }
+        }
+
+        if (!found_candidate) continue;
+
+        size_t win_start = (cand_idx > first_refine_W) ? (cand_idx - first_refine_W) : 0;
+        size_t win_end = std::min(cand_signal.size(), cand_idx + first_refine_W + sync.size());
+
+        int best_rel = 0;
+        double best_m = 0.0;
+        if (!findSyncStartNormalizedWindow(cand_signal, win_start, win_end, sync, best_rel, best_m)) {
+            continue;
+        }
+
+        if (best_m < first_sync_threshold) continue;
+
+        const bool better_metric = (best_m > best.branch_metric + 1e-12);
+        const bool same_metric_earlier =
+            (std::abs(best_m - best.branch_metric) <= 1e-12 && cand_idx < best.first_candidate_idx);
+
+        if (best.branch_metric < 0.0 || better_metric || same_metric_earlier) {
+            best.resolved_cfo_hz = cand_cfo_hz;
+            best.branch_metric = best_m;
+            best.first_candidate_idx = cand_idx;
+            best.branch_k = k;
+            best.corrected_signal = std::move(cand_signal);
+        }
+    }
+
+    return best;
+}
+
 Receiver::Receiver(const TransmitterConfig& config)
     : config_(config)
 {
@@ -477,6 +692,8 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     VecComplex SYNC = concatSync(sync_wide, sync_fine);
     const int sync_len = (int)SYNC.size();
     const int fine_sync_len = (int)sync_fine.size();
+    const size_t coarse_block_len =
+        sync_wide.empty() ? 0 : (sync_wide.size() / (size_t)std::max(1, config_.coarse_length));
 
     // 2) 单帧长度（按 RS 编码后的 payload 算）
     const int source_bits = config_.frame_bit * config_.n;
@@ -524,17 +741,96 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         return {};
     }
 
-    VecInt total_rx_bits;
-    size_t current_offset = 0;
-    const size_t total_rx_len = rx_signal.size();
+    VecComplex rx_sync_signal = rx_signal;
+    size_t coarse_cfo_start = 0;
+    double coarse_cfo_score = 0.0;
+    double coarse_cfo_hz_aliased = estimateCoarseCFOFromRepeatedSync(
+        rx_signal,
+        coarse_block_len,
+        config_.coarse_length,
+        fs,
+        coarse_cfo_start,
+        coarse_cfo_score);
 
     const double sync_threshold = 0.08;
     const size_t W = (size_t)(2 * s);
 
-    const double first_sync_threshold = 0.35;
-    const size_t first_refine_W = (size_t)(2 * s);
+    const double first_sync_threshold = 0.4;
+    const size_t first_refine_W = (size_t)(8 * s);
 
-    bool acquired = false;
+    CFOBranchResolveResult cfo_branch = resolveCoarseCFOAmbiguity(
+        rx_signal,
+        SYNC,
+        coarse_cfo_hz_aliased,
+        fs,
+        coarse_block_len,
+        first_sync_threshold,
+        first_refine_W);
+
+    double coarse_cfo_hz = cfo_branch.resolved_cfo_hz;
+    if (!cfo_branch.corrected_signal.empty()) {
+        rx_sync_signal = std::move(cfo_branch.corrected_signal);
+    }
+    else if (std::abs(coarse_cfo_hz) >= 1.0) {
+        rx_sync_signal = applyFrequencyCorrection(rx_signal, fs, coarse_cfo_hz);
+    }
+
+    std::cout << "[DBG][ACQ_CFO] coarse_block_len=" << coarse_block_len
+        << " coarse_cfo_start=" << coarse_cfo_start
+        << " coarse_cfo_score=" << coarse_cfo_score
+        << " coarse_cfo_hz_aliased=" << coarse_cfo_hz_aliased
+        << " coarse_cfo_branch_k=" << cfo_branch.branch_k
+        << " coarse_cfo_branch_metric=" << cfo_branch.branch_metric
+        << " coarse_cfo_hz_resolved=" << coarse_cfo_hz
+        << " sync_input=" << ((std::abs(coarse_cfo_hz) >= 1.0) ? "pre_corrected" : "raw")
+        << "\n";
+
+    bool first_found_candidate = false;
+    size_t first_cand_idx = 0;
+
+    const size_t first_search_end = rx_sync_signal.size() - (size_t)sync_len;
+    for (size_t i = 0; i <= first_search_end; ++i) {
+        double m = metricAtNormalized(rx_sync_signal, i, SYNC);
+        if (m >= first_sync_threshold) {
+            first_cand_idx = i;
+            first_found_candidate = true;
+            break;
+        }
+    }
+
+    if (!first_found_candidate) {
+        std::cout << "[Receiver] No sync candidate above threshold found for first frame, demodulation ended\n";
+        return {};
+    }
+
+    size_t first_win_start = (first_cand_idx > first_refine_W) ? (first_cand_idx - first_refine_W) : 0;
+    size_t first_win_end = std::min(rx_sync_signal.size(), first_cand_idx + first_refine_W + (size_t)sync_len);
+
+    int first_best_rel = 0;
+    double first_best_m = 0.0;
+    if (!findSyncStartNormalizedWindow(rx_sync_signal, first_win_start, first_win_end, SYNC, first_best_rel, first_best_m)) {
+        std::cout << "[Receiver] Fine search near first frame candidate failed, demodulation ended\n";
+        return {};
+    }
+
+    const size_t estimated_sto_samp = first_win_start + (size_t)first_best_rel;
+    if (first_best_m < first_sync_threshold) {
+        std::cout << "[Receiver] First frame sync peak too low (" << first_best_m << "), demodulation ended\n";
+        return {};
+    }
+
+    std::cout << "[DBG][STO] estimated_sto_samp=" << estimated_sto_samp
+        << " first_cand_idx=" << first_cand_idx
+        << " first_metric=" << first_best_m
+        << "\n";
+
+    VecComplex rx_aligned_signal = shiftSignalLeftWithZeroPad(rx_sync_signal, estimated_sto_samp);
+
+    VecInt total_rx_bits;
+    size_t current_offset = 0;
+    const size_t total_rx_len = rx_aligned_signal.size();
+    double sfo_hat_ppm = 0.0;
+    int sfo_track_count = 0;
 
     while (current_offset + (size_t)single_frame_total_samp <= total_rx_len) {
 
@@ -542,75 +838,29 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         double sync_metric = -1.0;
         bool ok = false;
 
-        if (!acquired) {
-            bool found_candidate = false;
-            size_t cand_idx = 0;
+        size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
+        size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
 
-            const size_t search_end = total_rx_len - (size_t)sync_len;
-            for (size_t i = 0; i <= search_end; ++i) {
-                double m = metricAtNormalized(rx_signal, i, SYNC);
-                if (m >= first_sync_threshold) {
-                    cand_idx = i;
-                    found_candidate = true;
-                    break;
-                }
-            }
-
-            if (!found_candidate) {
-                std::cout << "[Receiver] No sync candidate above threshold found for first frame, demodulation ended\n";
-                break;
-            }
-
-            size_t win_start = (cand_idx > first_refine_W) ? (cand_idx - first_refine_W) : 0;
-            size_t win_end = std::min(total_rx_len, cand_idx + first_refine_W + (size_t)sync_len);
-
-            int best_rel = 0;
-            double best_m = 0.0;
-            if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                std::cout << "[Receiver] Fine search near first frame candidate failed, demodulation ended\n";
-                break;
-            }
-
-            sync_abs_start = win_start + (size_t)best_rel;
-            sync_metric = best_m;
-            ok = (sync_metric >= first_sync_threshold);
-
-            if (!ok) {
-                std::cout << "[Receiver] First frame sync peak too low (" << sync_metric << "), demodulation ended\n";
-                break;
-            }
-
-            std::cout << "[DBG][FIRST] cand_idx=" << cand_idx
-                << " refined_sync_abs_start=" << sync_abs_start
-                << " metric=" << sync_metric << "\n";
-
-            acquired = true;
+        int best_rel = 0;
+        double best_m = 0.0;
+        if (!findSyncStartNormalizedWindow(rx_aligned_signal, win_start, win_end, SYNC, best_rel, best_m)) {
+            std::cout << "[Receiver] No valid sync header detected, demodulation ended\n";
+            break;
         }
-        else {
-            sync_abs_start = current_offset;
-            sync_metric = metricAtNormalized(rx_signal, sync_abs_start, SYNC);
-            ok = (sync_metric >= sync_threshold);
 
-            if (!ok) {
-                size_t win_start = (current_offset > W) ? (current_offset - W) : 0;
-                size_t win_end = std::min(total_rx_len, current_offset + W + (size_t)sync_len);
+        sync_abs_start = win_start + (size_t)best_rel;
+        sync_metric = best_m;
+        ok = (sync_metric >= sync_threshold);
 
-                int best_rel = 0;
-                double best_m = 0.0;
-                if (!findSyncStartNormalizedWindow(rx_signal, win_start, win_end, SYNC, best_rel, best_m)) {
-                    std::cout << "[Receiver] No valid sync header detected, demodulation ended\n";
-                    break;
-                }
+        if (!ok) {
+            std::cout << "[Receiver] Sync peak too low (" << sync_metric << "), demodulation ended\n";
+            break;
+        }
 
-                sync_abs_start = win_start + (size_t)best_rel;
-                sync_metric = best_m;
-                ok = (sync_metric >= sync_threshold);
-            }
-
-            if (!ok) {
-                std::cout << "[Receiver] Sync peak too low (" << sync_metric << "), demodulation ended\n";
-                break;
-            }
+        if (frame_count_ == 0) {
+            std::cout << "[DBG][FIRST] aligned_sync_abs_start=" << sync_abs_start
+                << " metric=" << sync_metric
+                << "\n";
         }
 
         const size_t frame_abs_end = sync_abs_start + (size_t)single_frame_total_samp;
@@ -625,8 +875,25 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             << " metric=" << sync_metric
             << "\n";
 
-        VecComplex current_frame(rx_signal.begin() + sync_abs_start,
-            rx_signal.begin() + frame_abs_end);
+        if (frame_count_ > 0 && sync_abs_start > 0) {
+            const double nominal_start = (double)frame_count_ * (double)single_frame_total_samp;
+            const double cumulative_drift = (double)sync_abs_start - nominal_start;
+            const double sfo_inst_ppm = (nominal_start > 1.0)
+                ? (cumulative_drift / nominal_start) * 1e6
+                : 0.0;
+            const double sfo_inst_ppm_clamped = clamp_value(sfo_inst_ppm, -200.0, 200.0);
+
+            if (sfo_track_count == 0) {
+                sfo_hat_ppm = sfo_inst_ppm_clamped;
+            }
+            else {
+                sfo_hat_ppm = 0.8 * sfo_hat_ppm + 0.2 * sfo_inst_ppm_clamped;
+            }
+            sfo_track_count++;
+        }
+
+        VecComplex current_frame(rx_aligned_signal.begin() + sync_abs_start,
+            rx_aligned_signal.begin() + frame_abs_end);
 
         // ====== CFO + 相位校正 ======
         VecComplex rx_fine_sync(current_frame.begin() + (sync_len - fine_sync_len),
@@ -665,6 +932,9 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
             f_use = 0.0;
         }
 
+        const double total_cfo_est_hz = coarse_cfo_hz + frame_freq_offset;
+        const double total_cfo_fit_hz = coarse_cfo_hz + f_hat;
+
         if (config_.enable_cfo && need_cfo_correction && f_use != 0.0) {
             for (size_t n = 0; n < current_frame.size(); ++n) {
                 double t = (double)n / fs;
@@ -691,9 +961,13 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
         }
 
         std::cout << "[DBG][CFO] frame=" << frame_count_
-            << " frame_freq_offset=" << frame_freq_offset
-            << " f_hat=" << f_hat
-            << " f_use=" << f_use
+            << " coarse_cfo_hz=" << coarse_cfo_hz
+            << " residual_cfo_hz=" << frame_freq_offset
+            << " residual_cfo_fit_hz=" << f_hat
+            << " total_cfo_est_hz=" << total_cfo_est_hz
+            << " total_cfo_fit_hz=" << total_cfo_fit_hz
+            << " applied_residual_cfo_hz=" << f_use
+            << " cfo_deadband_hz=" << cfo_deadband_hz
             << " residual_phase=" << residual_phase
             << "\n";
 
@@ -756,6 +1030,32 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
                 payload_sig = applySRRCMatchedFilterAndAlign(payload_sig, s, 0.5, 6);
             }
         }
+
+        if (std::abs(sfo_hat_ppm) > 0.01 &&
+            (config_.modulation == ModulationType::BPSK ||
+                config_.modulation == ModulationType::QPSK ||
+                config_.modulation == ModulationType::QAM ||
+                config_.modulation == ModulationType::OOK)) {
+            payload_sig = Channel::applySFO(payload_sig, -sfo_hat_ppm);
+        }
+
+        if (config_.modulation == ModulationType::BPSK ||
+            config_.modulation == ModulationType::QPSK ||
+            config_.modulation == ModulationType::QAM ||
+            config_.modulation == ModulationType::OOK) {
+            g_linear_decision_phase = chooseBestLinearDecisionPhase(payload_sig, s);
+        }
+        else {
+            g_linear_decision_phase = 0;
+        }
+
+        std::cout << "[DBG][TIMING] frame=" << frame_count_
+            << " sync_refine_win=[" << win_start << "," << win_end << ")"
+            << " best_sync_start=" << sync_abs_start
+            << " decision_phase=" << g_linear_decision_phase
+            << " sfo_hat_ppm=" << sfo_hat_ppm
+            << "\n";
+
         // ====== 保存星座图点（取最后一次成功锁帧的 payload） ======
         buildConstellationPoints(payload_sig);
 
@@ -810,11 +1110,16 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
 
         std::cout << "[Receiver] Frame " << frame_count_
             << " demodulated, sync peak: " << sync_metric
-            << ", CFO estimate: " << f_hat << "Hz"
+            << ", coarse CFO: " << coarse_cfo_hz << "Hz"
+            << ", residual CFO: " << frame_freq_offset << "Hz"
+            << ", total CFO est: " << total_cfo_est_hz << "Hz"
             << ", demodulated bits: " << rx_source_bits.size()
             << "\n";
 
-        current_offset = frame_abs_end;
+        const double sfo_scale = 1.0 + sfo_hat_ppm * 1e-6;
+        long long next_step = (long long)std::llround((double)single_frame_total_samp * sfo_scale);
+        if (next_step <= 0) next_step = single_frame_total_samp;
+        current_offset = sync_abs_start + (size_t)next_step;
     }
 
     return total_rx_bits;
@@ -825,12 +1130,9 @@ VecInt Receiver::demodulateBPSK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
-
-    const int decision_site = 0;
-    if ((size_t)decision_site >= rx.size()) return bits;
-
-    for (size_t idx = (size_t)decision_site; idx < rx.size(); idx += (size_t)s) {
-        bits.push_back(rx[idx].real() > 0.0 ? 1 : 0);
+    VecComplex syms = sampleLinearSymbolsAtPhase(rx, s, g_linear_decision_phase);
+    for (const auto& sym : syms) {
+        bits.push_back(sym.real() > 0.0 ? 1 : 0);
     }
 
     return bits;
@@ -841,12 +1143,8 @@ VecInt Receiver::demodulateQPSK(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
-
-    const int decision_site = 0;
-    if ((size_t)decision_site >= rx.size()) return bits;
-
-    for (size_t idx = (size_t)decision_site; idx < rx.size(); idx += (size_t)s) {
-        const Complex sym = rx[idx];
+    VecComplex syms = sampleLinearSymbolsAtPhase(rx, s, g_linear_decision_phase);
+    for (const auto& sym : syms) {
 
         int I_bit = (sym.real() > 0.0) ? 1 : 0;
         int Q_bit = (sym.imag() > 0.0) ? 1 : 0;
@@ -890,14 +1188,7 @@ VecInt Receiver::demodulateQAM16(const VecComplex& rx)
 {
     VecInt bits;
     const int s = std::max(1, config_.samp);
-
-    const int decision_site = 0;
-    if ((size_t)decision_site >= rx.size()) return bits;
-
-    VecComplex syms;
-    for (size_t idx = (size_t)decision_site; idx < rx.size(); idx += (size_t)s) {
-        syms.push_back(rx[idx]);
-    }
+    VecComplex syms = sampleLinearSymbolsAtPhase(rx, s, g_linear_decision_phase);
     if (syms.empty()) return bits;
 
     normalizeQAMSymbolsAdaptive(syms);
@@ -928,12 +1219,10 @@ VecInt Receiver::demodulateOOK(const VecComplex& rx)
     VecInt bits;
     const int s = std::max(1, config_.samp);
 
-    const int decision_site = 0;
-    if ((size_t)decision_site >= rx.size()) return bits;
-
     std::vector<double> samples;
-    for (size_t idx = (size_t)decision_site; idx < rx.size(); idx += (size_t)s) {
-        samples.push_back(rx[idx].real());
+    VecComplex syms = sampleLinearSymbolsAtPhase(rx, s, g_linear_decision_phase);
+    for (const auto& sym : syms) {
+        samples.push_back(sym.real());
     }
 
     if (samples.empty()) return bits;
@@ -1156,8 +1445,9 @@ void Receiver::buildConstellationPoints(const VecComplex& payload_sig)
         config_.modulation == ModulationType::QAM ||
         config_.modulation == ModulationType::OOK)
     {
-        for (size_t idx = 0; idx < payload_sig.size(); idx += (size_t)s) {
-            last_constellation_points_.push_back(payload_sig[idx]);
+        VecComplex syms = sampleLinearSymbolsAtPhase(payload_sig, s, g_linear_decision_phase);
+        for (const auto& sym : syms) {
+            last_constellation_points_.push_back(sym);
             if (last_constellation_points_.size() >= max_points) break;
         }
 
