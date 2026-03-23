@@ -531,7 +531,7 @@ VecInt Receiver::receive(const VecComplex& rx_signal)
     const double sync_threshold = 0.08;
     const size_t W = (size_t)(2 * s);
 
-    const double first_sync_threshold = 0.2;
+    const double first_sync_threshold = 0.35;
     const size_t first_refine_W = (size_t)(2 * s);
 
     bool acquired = false;

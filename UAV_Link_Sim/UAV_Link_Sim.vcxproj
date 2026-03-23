@@ -133,6 +133,7 @@
     <ClInclude Include="file_transfer.h" />
     <ClInclude Include="frequency_hop.h" />
     <ClInclude Include="modulation.h" />
+    <ClInclude Include="ofdm_link.h" />
     <ClInclude Include="radio_if.h" />
     <ClInclude Include="receiver.h" />
     <ClInclude Include="role_runner.h" />
@@ -150,6 +151,7 @@
     <ClCompile Include="frequency_hop.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="modulation.cpp" />
+    <ClCompile Include="ofdm_link.cpp" />
     <ClCompile Include="radio_awgn.cpp" />
     <ClCompile Include="radio_loopback.cpp" />
     <ClCompile Include="radio_usrp.cpp" />

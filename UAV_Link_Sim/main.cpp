@@ -1,115 +1,108 @@
-﻿#include <iostream>
-#include <stdexcept>
+#include <iostream>
+#include <iomanip>
+#include <string>
+#include <vector>
 
-#include "role_runner.h"
-
-// ===== 固定参数（两台电脑必须一致）=====
-static const std::string DEVICE_ARGS = "type=b200";
-static const double CENTER_FREQ = 2.45e9;
-static const double INFO_RATE = 50000.0;
-static const int HOP_PATTERN = 1;
-static const ModulationType MOD = ModulationType::QAM;
-
-// TX 参数
-static const int TX_REPEAT = 500;   // 多发几轮，防止对不上
-
-// RX 参数
-static const int RX_EXPECT_FRAMES = 300;
-
-// 文件模式（可先不用）
-static const bool USE_FILE_MODE = false;
-static const std::string INPUT_FILE = "test.jpg";
-static const std::string OUTPUT_FILE = "recv.jpg";
-
-// ======================================
+#include "sim_runner.h"
+#include "channel.h"
 
 int main()
 {
     try
     {
         std::cout << "============================\n";
-        std::cout << "  Dual-PC USRP Test\n";
+        std::cout << "  CUSTOM CHANNEL TEST\n";
         std::cout << "============================\n";
-        std::cout << "1. TX (Transmit)\n";
-        std::cout << "2. RX (Receive)\n";
-        std::cout << "Select: ";
 
-        int choice = 0;
-        std::cin >> choice;
+        // ===== 基本参数 =====
+        double snr_db = 20.0;
+        int tx_frames = 10;
+        double fc = 2.45e9;
+        double rate = 50000;
+        int hop = 1;
 
-        if (choice == 1)
-        {
-            std::cout << "\n[TX] Starting transmitter...\n";
+        ModulationType mod = ModulationType::QPSK;
 
-            SourceMode src = USE_FILE_MODE ? SourceMode::FileBits : SourceMode::RandomBits;
+        // ===== main里只改这几组数组即可做单因素 BER 测试 =====
+        const std::vector<int> sto_cases = { 0, 4, 8, 12, 16, 20 };
+        const std::vector<double> cfo_cases = { 0.0, 500.0, 1000.0, 2000.0, 4000.0, 6000.0 };
+        const std::vector<double> sfo_cases = { 0.0, 5.0, 10.0, 20.0, 40.0, 80.0 };
 
-            TxOnlyResult txr = run_tx_role_once(
-                DEVICE_ARGS,
-                CENTER_FREQ,
-                MOD,
-                INFO_RATE,
-                HOP_PATTERN,
-                src,
-                INPUT_FILE,
-                TX_REPEAT
-            );
+        auto make_base_channel = [snr_db]() {
+            ChannelConfig ch;
+            ch.enable_awgn = true;
+            ch.snr_dB = snr_db;
+            ch.seed = 123;
+            return ch;
+        };
 
-            std::cout << "\n========== TX DONE ==========\n";
-            std::cout << txr.log_text << std::endl;
-            std::cout << "TX frames = " << txr.tx_frame_count << std::endl;
-            std::cout << "TX samples = " << txr.tx_sample_count << std::endl;
-            std::cout << "fs = " << txr.fs << std::endl;
+        auto print_result = [](const std::string& factor_name,
+            double value,
+            const char* unit,
+            const TestResult& result) {
+                std::cout << std::fixed << std::setprecision(3)
+                    << factor_name << "=" << value << unit
+                    << " | BER=" << std::scientific << std::setprecision(6) << result.total_ber
+                    << std::fixed << " | bit_errors=" << result.total_bit_errors
+                    << " | compared_bits=" << result.total_compared_bits
+                    << " | decoded_frames=" << result.decoded_frames << "\n";
+        };
+
+        auto run_sweep = [&](const std::string& title,
+            const std::string& factor_name,
+            const std::vector<double>& values,
+            const auto& config_setter) {
+                std::cout << "\n========== " << title << " ==========\n";
+                for (double value : values) {
+                    ChannelConfig ch = make_base_channel();
+                    config_setter(ch, value);
+
+                    auto result = run_channel_test(
+                        snr_db,
+                        tx_frames,
+                        fc,
+                        mod,
+                        rate,
+                        hop,
+                        ch
+                    );
+
+                    const char* unit = "";
+                    if (factor_name == "STO") unit = " samp";
+                    else if (factor_name == "CFO") unit = " Hz";
+                    else if (factor_name == "SFO") unit = " ppm";
+
+                    print_result(factor_name, value, unit, result);
+                }
+        };
+
+        std::vector<double> sto_values;
+        sto_values.reserve(sto_cases.size());
+        for (int v : sto_cases) {
+            sto_values.push_back(static_cast<double>(v));
         }
-        else if (choice == 2)
-        {
-            std::cout << "\n[RX] Starting receiver...\n";
 
-            if (!USE_FILE_MODE)
-            {
-                RxOnlyResult rxr = run_rx_role_once(
-                    DEVICE_ARGS,
-                    CENTER_FREQ,
-                    MOD,
-                    INFO_RATE,
-                    HOP_PATTERN,
-                    RX_EXPECT_FRAMES
-                );
+        run_sweep("STO SWEEP", "STO", sto_values,
+            [](ChannelConfig& ch, double value) {
+                ch.enable_sto = true;
+                ch.sto_samp = static_cast<int>(value);
+            });
 
-                std::cout << "\n========== RX DONE ==========\n";
-                std::cout << rxr.log_text << std::endl;
-                std::cout << "RX samples = " << rxr.rx_sample_count << std::endl;
-                std::cout << "Decoded bits = " << rxr.decoded_bits_count << std::endl;
-                std::cout << "Decoded frames = " << rxr.decoded_frames << std::endl;
-                std::cout << "fs = " << rxr.fs << std::endl;
-            }
-            else
-            {
-                RxFileResult rfr = run_rx_file_role_once(
-                    DEVICE_ARGS,
-                    CENTER_FREQ,
-                    MOD,
-                    INFO_RATE,
-                    HOP_PATTERN,
-                    OUTPUT_FILE,
-                    1000
-                );
+        run_sweep("CFO SWEEP", "CFO", cfo_cases,
+            [](ChannelConfig& ch, double value) {
+                ch.enable_cfo = true;
+                ch.cfo_hz = value;
+            });
 
-                std::cout << "\n========== RX FILE DONE ==========\n";
-                std::cout << rfr.log_text << std::endl;
-                std::cout << "File saved = " << (rfr.file_saved ? "YES" : "NO") << std::endl;
-                std::cout << "Recovered filename = " << rfr.recovered_filename << std::endl;
-                std::cout << "Saved path = " << rfr.saved_file_path << std::endl;
-            }
-        }
-        else
-        {
-            throw std::runtime_error("Invalid choice.");
-        }
+        run_sweep("SFO SWEEP", "SFO", sfo_cases,
+            [](ChannelConfig& ch, double value) {
+                ch.enable_sfo = true;
+                ch.sfo_ppm = value;
+            });
     }
     catch (const std::exception& e)
     {
-        std::cerr << "\nERROR: " << e.what() << std::endl;
-        return 1;
+        std::cerr << "ERROR: " << e.what() << std::endl;
     }
 
     return 0;

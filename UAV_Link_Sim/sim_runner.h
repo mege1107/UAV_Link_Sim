@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include <complex>
-
+#include "channel.h"
 #include "transmitter.h"
 
 enum class RunMode
@@ -106,4 +106,16 @@ SweepResult run_awgn_sweep(
     int tx_repeat_frames,
     double center_freq_hz,
     ModulationType modulation
+);
+
+TestResult run_ofdm_random_bit_test(double awgn_snr_db);
+
+TestResult run_channel_test(
+    double snr_db,
+    int tx_repeat_frames,
+    double center_freq_hz,
+    ModulationType modulation,
+    double info_rate_bps,
+    int hop_pattern,
+    const ChannelConfig& ch_cfg
 );
