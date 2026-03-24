@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include "transmitter.h"
 #include "utils.h"
@@ -10,10 +10,10 @@ class Receiver {
 public:
     explicit Receiver(const TransmitterConfig& config);
 
-    // Ö÷½ÓÊÕÈë¿Ú
+    // ä¸»æ¥æ”¶å…¥å£
     VecInt receive(const VecComplex& rx_signal);
 
-    // ¸÷ÖÖµ÷ÖÆ½âµ÷
+    // å„ç§è°ƒåˆ¶è§£è°ƒ
     VecInt demodulateTelemetry(const VecComplex& rx);
 
     VecInt demodulateBPSK(const VecComplex& rx);
@@ -24,10 +24,10 @@ public:
     VecInt demodulateFM(const VecComplex& rx);
     VecInt demodulateMSK(const VecComplex& rx);
 
-    // CCSK ½âÀ©
+    // CCSK è§£æ‰©
     VecInt despreadCCSK(const VecInt& chips);
 
-    // Ò£¿ØÄ£Ê½½âÌøÆµ
+    // é¥æ§æ¨¡å¼è§£è·³é¢‘
     VecComplex dehopRemoteControlPayload(const VecComplex& payload_with_gap,
         int total_pulses,
         int pulse_len,
@@ -36,7 +36,7 @@ public:
     const VecComplex& getLastConstellationPoints() const { return last_constellation_points_; }
 
 private:
-    // ===== ÆµÆ« / ÏàÎ»Ïà¹Ø =====
+    // ===== é¢‘å / ç›¸ä½ç›¸å…³ =====
     double estimateCFOFromPreamble(const VecComplex& rx_preamble,
         const VecComplex& local_preamble,
         double fs);
@@ -51,11 +51,11 @@ private:
 
     void resetFreqHistory();
 
-    // ===== ĞÂÔö£º¸üÌù½ü MATLAB µÄ·ûºÅ´¦Àí =====
+    // ===== æ–°å¢ï¼šæ›´è´´è¿‘ MATLAB çš„ç¬¦å·å¤„ç† =====
     VecComplex meanGroups(const VecComplex& rx, int s) const;
     Complex pickMidSampleInSymbol(const VecComplex& rx, size_t base, int s) const;
 
-    // ===== ¸¨Öú =====
+    // ===== è¾…åŠ© =====
     int getTelemetryPayloadSampleCount(int ccsk_chip_num) const;
     bool modulationNeedsDiffDecode() const;
 
@@ -64,7 +64,7 @@ private:
 private:
     TransmitterConfig config_;
 
-    // CFO ÀúÊ·ÄâºÏ
+    // CFO å†å²æ‹Ÿåˆ
     std::vector<double> freq_offset_history_;
     std::vector<int> frame_index_history_;
     double fit_a_ = 0.0;

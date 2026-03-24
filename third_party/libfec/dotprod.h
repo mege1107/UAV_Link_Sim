@@ -1,4 +1,4 @@
-/* Internal definitions for dotproduct function */
+﻿/* Internal definitions for dotproduct function */
 
 struct dotprod {
   int len; /* Number of coefficients */

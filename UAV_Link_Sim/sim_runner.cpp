@@ -1,4 +1,4 @@
-#include "sim_runner.h"
+﻿#include "sim_runner.h"
 #include "ofdm_link.h"
 #include <random>
 #include <iostream>
@@ -20,7 +20,7 @@
 #endif
 
 static constexpr bool SHOW_PURE_MSK_ONLY = true;
-static constexpr bool kEnableDebugLogs = false;
+static constexpr bool kEnableDebugLogs = true;
 
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
@@ -41,6 +41,268 @@ static double compute_ber(const VecInt& tx, const VecInt& rx, size_t& bit_errors
             bit_errors++;
 
     return n ? (double)bit_errors / (double)n : 0.0;
+}
+
+static double wrap_phase_pm_pi(double x)
+{
+    while (x > M_PI) x -= 2.0 * M_PI;
+    while (x < -M_PI) x += 2.0 * M_PI;
+    return x;
+}
+
+static int detect_ofdm_pss_refined(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    int refine_radius = 8)
+{
+    if (rx.size() < pss.size()) return -1;
+
+    double best = -1.0;
+    int coarse_pos = -1;
+    for (size_t d = 0; d + pss.size() <= rx.size(); ++d) {
+        Complex acc(0.0, 0.0);
+        for (size_t k = 0; k < pss.size(); ++k) {
+            acc += std::conj(pss[k]) * rx[d + k];
+        }
+        const double v = std::norm(acc);
+        if (v > best) {
+            best = v;
+            coarse_pos = static_cast<int>(d);
+        }
+    }
+
+    if (coarse_pos < 0) return -1;
+
+    const int start = std::max(0, coarse_pos - refine_radius);
+    const int end = std::min(
+        static_cast<int>(rx.size() - pss.size()),
+        coarse_pos + refine_radius);
+
+    double refine_best = -1.0;
+    int refine_pos = coarse_pos;
+    for (int d = start; d <= end; ++d) {
+        Complex acc(0.0, 0.0);
+        double er = 0.0;
+        double ep = 0.0;
+        for (size_t k = 0; k < pss.size(); ++k) {
+            acc += std::conj(pss[k]) * rx[static_cast<size_t>(d) + k];
+            er += std::norm(rx[static_cast<size_t>(d) + k]);
+            ep += std::norm(pss[k]);
+        }
+        if (er <= 1e-12 || ep <= 1e-12) continue;
+        const double metric = std::norm(acc) / (er * ep);
+        if (metric > refine_best) {
+            refine_best = metric;
+            refine_pos = d;
+        }
+    }
+
+    return refine_pos;
+}
+
+static double estimate_ofdm_cfo_from_cp(
+    const VecComplex& rx,
+    int pss_pos,
+    const OFDMConfig& cfg)
+{
+    const int pss_len = static_cast<int>(OFDMUtils::makePSS(cfg.N_fft).size());
+    const int cp_start = pss_pos + pss_len - 1;
+    const int data_start = cp_start + cfg.N_cp;
+    const int tail_start = data_start + cfg.N_fft - cfg.N_cp;
+    const int need_end = data_start + cfg.N_fft;
+
+    if (cp_start < 0 || need_end > static_cast<int>(rx.size())) return 0.0;
+
+    Complex acc(0.0, 0.0);
+    for (int n = 0; n < cfg.N_cp; ++n) {
+        const Complex& a = rx[static_cast<size_t>(cp_start + n)];
+        const Complex& b = rx[static_cast<size_t>(tail_start + n)];
+        acc += std::conj(a) * b;
+    }
+
+    if (std::abs(acc) <= 1e-12) return 0.0;
+
+    const double phase = std::atan2(acc.imag(), acc.real());
+    return phase * cfg.sampleRate() / (2.0 * M_PI * static_cast<double>(cfg.N_fft));
+}
+
+static VecComplex apply_frequency_correction(
+    const VecComplex& signal,
+    double fs,
+    double freq_hz)
+{
+    if (signal.empty()) return signal;
+    if (!std::isfinite(fs) || fs <= 0.0) return signal;
+    if (!std::isfinite(freq_hz) || std::abs(freq_hz) < 1e-12) return signal;
+
+    VecComplex out(signal.size());
+    for (size_t n = 0; n < signal.size(); ++n) {
+        const double ang = 2.0 * M_PI * freq_hz * static_cast<double>(n) / fs;
+        out[n] = signal[n] * std::conj(Complex(std::cos(ang), std::sin(ang)));
+    }
+    return out;
+}
+
+static void fit_phase_line(
+    const std::vector<int>& x,
+    const std::vector<double>& y,
+    double& a,
+    double& b)
+{
+    a = 0.0;
+    b = 0.0;
+    if (x.size() != y.size() || x.empty()) return;
+    if (x.size() == 1) {
+        b = y.front();
+        return;
+    }
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    const double n = static_cast<double>(x.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        const double xd = static_cast<double>(x[i]);
+        sx += xd;
+        sy += y[i];
+        sxx += xd * xd;
+        sxy += xd * y[i];
+    }
+
+    const double denom = n * sxx - sx * sx;
+    if (std::abs(denom) < 1e-12) {
+        b = sy / n;
+        return;
+    }
+
+    a = (n * sxy - sx * sy) / denom;
+    b = (sy - a * sx) / n;
+}
+
+static bool extract_ofdm_symbols_from_pss(
+    const VecComplex& rx,
+    int pss_pos,
+    const VecComplex& pss,
+    const OFDMConfig& cfg,
+    std::vector<VecComplex>& symbols_no_cp)
+{
+    symbols_no_cp.clear();
+
+    const int pos0 = pss_pos + static_cast<int>(pss.size()) - 1;
+    for (int i = 0; i < cfg.Nd; ++i) {
+        const int cp_start = pos0 + i * cfg.N_symbol();
+        const int data_start = cp_start + cfg.N_cp;
+        const int data_end = data_start + cfg.N_fft;
+
+        if (data_start < 0 || data_end > static_cast<int>(rx.size())) {
+            symbols_no_cp.clear();
+            return false;
+        }
+
+        symbols_no_cp.emplace_back(
+            rx.begin() + data_start,
+            rx.begin() + data_end);
+    }
+
+    return true;
+}
+
+static double score_ofdm_cfo_candidate(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    const OFDMConfig& cfg,
+    double cfo_hz)
+{
+    const VecComplex rx_corr = apply_frequency_correction(rx, cfg.sampleRate(), cfo_hz);
+    const int pss_pos = detect_ofdm_pss_refined(rx_corr, pss, 12);
+    if (pss_pos < 0) return -1e300;
+
+    std::vector<VecComplex> symbols_no_cp;
+    if (!extract_ofdm_symbols_from_pss(rx_corr, pss_pos, pss, cfg, symbols_no_cp)) {
+        return -1e300;
+    }
+
+    auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
+    const int pilotNum = static_cast<int>(pilotPos.size());
+    if (pilotNum <= 0) return -1e300;
+
+    std::vector<std::vector<Complex>> pilotSeq(
+        pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
+    {
+        uint32_t s = 1u;
+        auto rbit = [&]() {
+            s = 1664525u * s + 1013904223u;
+            return (s >> 31) & 1u;
+        };
+        for (int r = 0; r < pilotNum; ++r) {
+            for (int c = 0; c < cfg.Nd; ++c) {
+                pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
+            }
+        }
+    }
+
+    double score = 0.0;
+    int score_terms = 0;
+
+    const int eval_cols = std::min(cfg.Nd, 3);
+    for (int col = 0; col < eval_cols; ++col) {
+        VecComplex Y = OFDMUtils::fft(symbols_no_cp[col]);
+        VecComplex used(cfg.N_sc);
+        for (int k = 0; k < cfg.N_sc; ++k) {
+            used[k] = Y[1 + k];
+        }
+
+        std::vector<double> phase(pilotNum, 0.0);
+        double mag_sum = 0.0;
+        for (int i = 0; i < pilotNum; ++i) {
+            Complex h = (std::abs(pilotSeq[i][col]) > 1e-12)
+                ? (used[pilotPos[i]] / pilotSeq[i][col])
+                : Complex(1.0, 0.0);
+            phase[i] = std::atan2(h.imag(), h.real());
+            mag_sum += std::abs(h);
+            if (i > 0) {
+                phase[i] = phase[i - 1] + wrap_phase_pm_pi(phase[i] - phase[i - 1]);
+            }
+        }
+
+        double a = 0.0, b = 0.0;
+        fit_phase_line(pilotPos, phase, a, b);
+
+        double residual_var = 0.0;
+        for (int i = 0; i < pilotNum; ++i) {
+            const double pred = a * static_cast<double>(pilotPos[i]) + b;
+            const double err = wrap_phase_pm_pi(phase[i] - pred);
+            residual_var += err * err;
+        }
+        residual_var /= static_cast<double>(pilotNum);
+
+        const double mag_avg = mag_sum / static_cast<double>(pilotNum);
+        score += mag_avg - 5.0 * residual_var;
+        score_terms++;
+    }
+
+    if (score_terms <= 0) return -1e300;
+    return score / static_cast<double>(score_terms);
+}
+
+static double resolve_ofdm_cfo_ambiguity(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    const OFDMConfig& cfg,
+    double cfo_alias_hz)
+{
+    const double step_hz = cfg.sampleRate() / static_cast<double>(cfg.N_fft);
+    double best_cfo = cfo_alias_hz;
+    double best_score = -1e300;
+
+    for (int k = -2; k <= 2; ++k) {
+        const double cand = cfo_alias_hz + static_cast<double>(k) * step_hz;
+        const double score = score_ofdm_cfo_candidate(rx, pss, cfg, cand);
+        if (score > best_score) {
+            best_score = score;
+            best_cfo = cand;
+        }
+    }
+
+    return best_cfo;
 }
 
 static std::vector<unsigned char> bits_to_bytes(const VecInt& bits)
@@ -952,11 +1214,13 @@ SweepResult run_awgn_sweep(
 #include "ofdm_link.h"
 #include <random>
 
-TestResult run_ofdm_random_bit_test(double awgn_snr_db)
+TestResult run_ofdm_random_bit_test(
+    double awgn_snr_db,
+    const ChannelConfig& ch_cfg)
 {
     std::ostringstream log;
 
-    // ===== OFDM ���� =====
+    // ===== OFDM 锟斤拷锟斤拷 =====
     OFDMConfig cfg;
     cfg.N_fft = 256;
     cfg.N_cp = 32;
@@ -974,11 +1238,11 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
 
     TestResult tr;
 
-    // ===== ÿ֡�ɳ��ص�ԭʼ bit �� =====
+    // ===== 每帧锟缴筹拷锟截碉拷原始 bit 锟斤拷 =====
     auto dataPos = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
     const int dataRow = static_cast<int>(dataPos.size());
     const int codedBitsPerFrame = dataRow * cfg.Nd * static_cast<int>(std::log2(cfg.M));
-    const int uncodedBitsPerFrame = codedBitsPerFrame / 2; // 1/2 �����
+    const int uncodedBitsPerFrame = codedBitsPerFrame / 2; // 1/2 锟斤拷锟斤拷锟?
 
     std::mt19937 rng(1);
     std::uniform_int_distribution<int> dist01(0, 1);
@@ -986,32 +1250,32 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
     size_t total_bit_errors = 0;
     size_t total_compared_bits = 0;
 
-    // ֻ�������һ֡��ͼ�����ݣ����� 200 ֡ȫ����ȥ̫��
+    // 只锟斤拷锟斤拷锟斤拷锟揭恢★拷锟酵硷拷锟斤拷锟斤拷荩锟斤拷锟斤拷锟?200 帧全锟斤拷锟斤拷去太锟斤拷
     VecComplex last_eqSyms;
     VecComplex last_tx_sig;
     VecComplex last_rx_sig;
 
     for (int frm = 0; frm < kNumFrames; ++frm)
     {
-        // ===== ������� bit =====
+        // ===== 锟斤拷锟斤拷锟斤拷锟?bit =====
         VecInt tx_bits;
         tx_bits.reserve(uncodedBitsPerFrame);
         for (int i = 0; i < uncodedBitsPerFrame; ++i) {
             tx_bits.push_back(dist01(rng));
         }
 
-        // ===== ���ˣ����� + QAM =====
+        // ===== 锟斤拷锟剿ｏ拷锟斤拷锟斤拷 + QAM =====
         VecInt codedBits = OFDMUtils::convEncode_171_133(tx_bits);
         VecComplex qamSyms = OFDMUtils::qamMod(codedBits, cfg.M);
 
-        // ===== ��Դӳ�� =====
+        // ===== 锟斤拷源映锟斤拷 =====
         auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
         auto dataPos2 = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
 
         const int pilotNum = static_cast<int>(pilotPos.size());
         std::vector<std::vector<Complex>> grid(cfg.N_sc, std::vector<Complex>(cfg.Nd, Complex(0.0, 0.0)));
 
-        // �뷢��һ�µ� pilot ����
+        // 锟诫发锟斤拷一锟铰碉拷 pilot 锟斤拷锟斤拷
         std::vector<std::vector<Complex>> pilotSeq(pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
         {
             uint32_t s = 1u;
@@ -1037,13 +1301,13 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             }
         }
 
-        // ===== OFDM ���� =====
+        // ===== OFDM 锟斤拷锟斤拷 =====
         VecComplex tx_data;
         for (int col = 0; col < cfg.Nd; ++col)
         {
             VecComplex X(cfg.N_fft, Complex(0.0, 0.0));
 
-            // bin0=DC, 1..N_sc ������
+            // bin0=DC, 1..N_sc 锟斤拷锟斤拷锟斤拷
             for (int k = 0; k < cfg.N_sc; ++k) {
                 X[1 + k] = grid[k][col];
             }
@@ -1057,41 +1321,45 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             tx_data.insert(tx_data.end(), x.begin(), x.end());
         }
 
-        // ===== ��ǰ���� + PSS =====
+        // ===== 锟斤拷前锟斤拷锟斤拷 + PSS =====
         VecComplex tx_sig;
         tx_sig.insert(tx_sig.end(), cfg.N_zeros, Complex(0.0, 0.0));
         VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
         tx_sig.insert(tx_sig.end(), pss.begin(), pss.end());
         tx_sig.insert(tx_sig.end(), tx_data.begin(), tx_data.end());
 
-        // ===== AWGN =====
-        VecComplex rx_sig = Channel::awgn(tx_sig, awgn_snr_db);
+        ChannelConfig cfg_local = ch_cfg;
+        cfg_local.snr_dB = awgn_snr_db;
 
-        // ===== ����ͬ�� =====
-        int pssPos = -1;
-        {
-            double best = -1.0;
-            for (size_t d = 0; d + pss.size() <= rx_sig.size(); ++d) {
-                Complex acc(0.0, 0.0);
-                for (size_t k = 0; k < pss.size(); ++k) {
-                    acc += std::conj(pss[k]) * rx_sig[d + k];
-                }
-                double v = std::abs(acc);
-                if (v > best) {
-                    best = v;
-                    pssPos = static_cast<int>(d);
-                }
-            }
+        if (cfg_local.enable_sto && cfg_local.sto_samp > 0) {
+            const size_t tail_guard =
+                static_cast<size_t>(cfg_local.sto_samp) + (size_t)cfg.N_symbol();
+            tx_sig.insert(tx_sig.end(), tail_guard, Complex(0.0, 0.0));
         }
+
+        VecComplex rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
+
+        // ===== 锟斤拷锟斤拷同锟斤拷 =====
+        int pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
 
         if (pssPos < 0) {
             throw std::runtime_error("OFDM PSS detect failed.");
         }
 
-        // ===== ��ȡ OFDM ���� =====
+        const double cfo_alias_hz = estimate_ofdm_cfo_from_cp(rx_sig, pssPos, cfg);
+        const double cfo_hat_hz = resolve_ofdm_cfo_ambiguity(rx_sig, pss, cfg, cfo_alias_hz);
+        if (std::isfinite(cfo_hat_hz) && std::abs(cfo_hat_hz) > 1e-9) {
+            rx_sig = apply_frequency_correction(rx_sig, cfg.sampleRate(), cfo_hat_hz);
+            pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
+            if (pssPos < 0) {
+                throw std::runtime_error("OFDM PSS detect failed after CFO correction.");
+            }
+        }
+
+        // ===== 锟斤拷取 OFDM 锟斤拷锟斤拷 =====
         std::vector<VecComplex> symbolsNoCP;
         {
-            // �������� SNR �����쳣���룬�����Ըĳ� pssPos + pss.size()
+            // 锟斤拷锟斤拷锟斤拷锟斤拷 SNR 锟斤拷锟斤拷锟届常锟斤拷锟诫，锟斤拷锟斤拷锟皆改筹拷 pssPos + pss.size()
             int pos0 = pssPos + static_cast<int>(pss.size()) - 1;
 
             for (int i = 0; i < cfg.Nd; ++i) {
@@ -1110,7 +1378,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
             }
         }
 
-        // ===== FFT + ��Ƶ���� + ���� =====
+        // ===== FFT + 锟斤拷频锟斤拷锟斤拷 + 锟斤拷锟斤拷 =====
         VecComplex eqSyms;
 
         for (int col = 0; col < cfg.Nd; ++col)
@@ -1128,16 +1396,43 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
                 txPilot[i] = pilotSeq[i][col];
             }
 
-            auto H = OFDMUtils::linearInterpChannel(pilotPos, rxPilot, txPilot, dataPos2);
+            std::vector<double> pilot_phase(pilotNum, 0.0);
+            for (int i = 0; i < pilotNum; ++i) {
+                Complex h = (std::abs(txPilot[i]) > 1e-12)
+                    ? (rxPilot[i] / txPilot[i])
+                    : Complex(1.0, 0.0);
+                pilot_phase[i] = std::atan2(h.imag(), h.real());
+                if (i > 0) {
+                    pilot_phase[i] = pilot_phase[i - 1] +
+                        wrap_phase_pm_pi(pilot_phase[i] - pilot_phase[i - 1]);
+                }
+            }
+
+            double phase_slope = 0.0;
+            double phase_bias = 0.0;
+            fit_phase_line(pilotPos, pilot_phase, phase_slope, phase_bias);
+
+            VecComplex used_phase_corrected = used;
+            for (int k = 0; k < cfg.N_sc; ++k) {
+                const double ph = phase_slope * static_cast<double>(k) + phase_bias;
+                used_phase_corrected[k] *= std::conj(Complex(std::cos(ph), std::sin(ph)));
+            }
+
+            VecComplex rxPilotCorrected(pilotNum);
+            for (int i = 0; i < pilotNum; ++i) {
+                rxPilotCorrected[i] = used_phase_corrected[pilotPos[i]];
+            }
+
+            auto H = OFDMUtils::linearInterpChannel(pilotPos, rxPilotCorrected, txPilot, dataPos2);
 
             for (size_t i = 0; i < dataPos2.size(); ++i) {
                 Complex h = H[i];
                 if (std::abs(h) < 1e-12) h = Complex(1.0, 0.0);
-                eqSyms.push_back(used[dataPos2[i]] / h);
+                eqSyms.push_back(used_phase_corrected[dataPos2[i]] / h);
             }
         }
 
-        // ===== ��� + ���� =====
+        // ===== 锟斤拷锟?+ 锟斤拷锟斤拷 =====
         VecInt rx_coded_bits = OFDMUtils::qamDemod(eqSyms, cfg.M);
         VecInt rx_bits = OFDMUtils::viterbiDecodeHard_171_133(rx_coded_bits, cfg.tblen);
 
@@ -1151,7 +1446,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
         total_bit_errors += bit_errors;
         total_compared_bits += std::min(tx_bits.size(), rx_bits.size());
 
-        // �������һ֡����ǰ����ʾ
+        // 锟斤拷锟斤拷锟斤拷锟揭恢★拷锟斤拷锟角帮拷锟斤拷锟绞?
         if (frm == kNumFrames - 1) {
             last_eqSyms = eqSyms;
             last_tx_sig = tx_sig;
@@ -1171,7 +1466,7 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
         : 0.0;
     tr.decoded_frames = kNumFrames;
 
-    // ===== ͼ�����ݣ�ֻ��ʾ���һ֡ =====
+    // ===== 图锟斤拷锟斤拷锟捷ｏ拷只锟斤拷示锟斤拷锟揭恢?=====
     build_constellation_result(last_eqSyms, tr);
 
     const VecComplex tx_sig_wave_mid = extract_center_segment(last_tx_sig, 4000);
@@ -1212,7 +1507,13 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
     );
 
     log << "========== OFDM RANDOM BIT TEST ==========\n";
-    log << "[CHANNEL] AWGN\n";
+    log << "[CHANNEL] STO=" << (ch_cfg.enable_sto ? "ON" : "OFF")
+        << " CFO=" << (ch_cfg.enable_cfo ? "ON" : "OFF")
+        << " SFO=" << (ch_cfg.enable_sfo ? "ON" : "OFF")
+        << " AWGN=" << (ch_cfg.enable_awgn ? "ON" : "OFF") << "\n";
+    log << "[STO samp] " << ch_cfg.sto_samp << "\n";
+    log << "[CFO Hz] " << ch_cfg.cfo_hz << "\n";
+    log << "[SFO ppm] " << ch_cfg.sfo_ppm << "\n";
     log << "[Frames] " << kNumFrames << "\n";
     log << "[N_fft] " << cfg.N_fft << "\n";
     log << "[N_cp] " << cfg.N_cp << "\n";
@@ -1222,6 +1523,9 @@ TestResult run_ofdm_random_bit_test(double awgn_snr_db)
     log << "[M] " << cfg.M << "\n";
     log << "[delta_f] " << cfg.delta_f << "\n";
     log << "[fs] " << cfg.sampleRate() << "\n";
+    log << "[OFDM anti-STO] PSS coarse/refined sync\n";
+    log << "[OFDM anti-CFO] CP-based coarse CFO + ambiguity resolution\n";
+    log << "[OFDM anti-SFO] pilot affine phase correction\n";
     log << "[Total compared bits] " << total_compared_bits << "\n";
     log << "[Total bit errors] " << total_bit_errors << "\n";
     log << "BER = " << tr.total_ber << "\n";
@@ -1242,7 +1546,7 @@ TestResult run_channel_test(
 {
     std::ostringstream log;
 
-    // ===== ��������� =====
+    // ===== 锟斤拷锟斤拷锟斤拷锟斤拷锟?=====
     TransmitterConfig cfg;
 
     cfg.function =
@@ -1270,14 +1574,14 @@ TestResult run_channel_test(
 
     Receiver rx(cfg);
 
-    // ===== ���� burst =====
+    // ===== 锟斤拷锟斤拷 burst =====
     VecComplex tx_burst;
     for (int i = 0; i < tx_repeat_frames; ++i) {
         tx_burst.insert(tx_burst.end(), one_frame_sig.begin(), one_frame_sig.end());
     }
 
-    // ===== ���ŵ���� =====
-    // ���� STO ����׷��β�������������޳� burst ��ǰ�����ض��������֡
+    // ===== 锟斤拷锟脚碉拷锟斤拷锟?=====
+    // 锟斤拷锟斤拷 STO 锟斤拷锟斤拷追锟斤拷尾锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟睫筹拷 burst 锟斤拷前锟斤拷锟斤拷锟截讹拷锟斤拷锟斤拷锟斤拷锟街?
     if (ch_cfg.enable_sto && ch_cfg.sto_samp > 0) {
         const size_t tail_guard = static_cast<size_t>(ch_cfg.sto_samp) + one_frame_sig.size();
         tx_burst.insert(tx_burst.end(), tail_guard, Complex(0.0, 0.0));
@@ -1292,7 +1596,7 @@ TestResult run_channel_test(
         throw std::runtime_error("rx_sig is empty.");
     }
 
-    // ===== ���� =====
+    // ===== 锟斤拷锟斤拷 =====
     VecInt rx_bits = rx.receive(rx_sig);
 
     TestResult tr;
@@ -1329,7 +1633,7 @@ TestResult run_channel_test(
         (double)total_bit_errors / (double)total_compared_bits :
         0.0;
 
-    // ===== ����/Ƶ�� =====
+    // ===== 锟斤拷锟斤拷/频锟斤拷 =====
     {
         const VecComplex& tx_sig_full = tx.getLastPureModulatedSignal();
 
@@ -1352,7 +1656,7 @@ TestResult run_channel_test(
             tr.rx_spectrum_freq, tr.rx_spectrum_mag);
     }
 
-    // ===== ��־ =====
+    // ===== 锟斤拷志 =====
     log << "========== CUSTOM CHANNEL TEST ==========\n";
     log << "[MOD] " << modulation_to_string(modulation) << "\n";
     log << "[SNR] " << snr_db << " dB\n";

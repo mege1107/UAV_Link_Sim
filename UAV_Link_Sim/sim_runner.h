@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <string>
 #include <vector>
@@ -26,7 +26,7 @@ struct TestResult
     size_t total_compared_bits = 0;
     size_t decoded_frames = 0;
 
-    // ·¢Éä¶Ë²¨ĞÎ/ÆµÆ×/Ê±ÆµÍ¼
+    // æ—¶é¢‘å›¾
     std::vector<double> waveform;
     WaveformType waveform_type = WaveformType::REAL;
 
@@ -40,22 +40,22 @@ struct TestResult
     double spectrogram_freq_min = 0.0;
     double spectrogram_freq_max = 0.0;
 
-    // ½ÓÊÕ¶Ë²¨ĞÎ/ÆµÆ×
+    // é”Ÿæ–¤æ‹·é”Ÿç§¸ç«¯è¯§æ‹·é”Ÿæ–¤æ‹·/é¢‘é”Ÿæ–¤æ‹·
     std::vector<double> rx_waveform;
     WaveformType rx_waveform_type = WaveformType::REAL;
 
     std::vector<double> rx_spectrum_freq;
     std::vector<double> rx_spectrum_mag;
 
-    // ===== ĞÂÔö£ºĞÇ×ùÍ¼ =====
+    // ===== é”Ÿæ–¤æ‹·é”Ÿæ–¤æ‹·é”Ÿæ–¤æ‹·é”Ÿæ–¤æ‹·é”Ÿæ–¤æ‹·å›¾ =====
     std::vector<double> constellation_i;
     std::vector<double> constellation_q;
 
-    // ÎÄ¼ş»Ö¸´
+    // é”Ÿä¾¥ç¡·æ‹·é”Ÿè¡—é©æ‹·
     bool file_saved = false;
     std::string saved_file_path;
 
-    // ÈÕÖ¾
+    // é”Ÿæ–¤æ‹·å¿—
     std::string log_text;
 };
 
@@ -108,7 +108,9 @@ SweepResult run_awgn_sweep(
     ModulationType modulation
 );
 
-TestResult run_ofdm_random_bit_test(double awgn_snr_db);
+TestResult run_ofdm_random_bit_test(
+    double awgn_snr_db,
+    const ChannelConfig& ch_cfg = ChannelConfig{});
 
 TestResult run_channel_test(
     double snr_db,

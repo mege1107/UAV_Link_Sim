@@ -1,4 +1,4 @@
-#include "file_transfer.h"
+﻿#include "file_transfer.h"
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>

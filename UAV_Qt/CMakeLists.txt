@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 add_compile_options(/utf-8)
 
 project(UAV_Qt VERSION 0.1 LANGUAGES CXX)

@@ -8,7 +8,7 @@
 #include <cctype>
 
 namespace {
-    constexpr bool kEnableDebugLogs = false;
+    constexpr bool kEnableDebugLogs = true;
 }
 
 Transmitter::Transmitter(const TransmitterConfig& config) : config_(config) {

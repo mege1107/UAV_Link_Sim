@@ -1,4 +1,4 @@
-/* The guts of the Reed-Solomon decoder, meant to be #included
+﻿/* The guts of the Reed-Solomon decoder, meant to be #included
  * into a function body with the following typedefs, macros and variables supplied
  * according to the code parameters:
 

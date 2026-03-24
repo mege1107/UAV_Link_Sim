@@ -16,7 +16,7 @@ static inline Complex cexpj(double a) {
 
 namespace {
     int g_linear_decision_phase = 0;
-    constexpr bool kEnableDebugLogs = false;
+    constexpr bool kEnableDebugLogs = true;
 }
 
 // =============== 一些本地辅助函数 ===============

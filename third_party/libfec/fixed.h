@@ -1,4 +1,4 @@
-/* Stuff specific to the CCSDS (255,223) RS codec
+﻿/* Stuff specific to the CCSDS (255,223) RS codec
  * (255,223) code over GF(256). Note: the conventional basis is still
  * used; the dual-basis mappings are performed in [en|de]code_rs_ccsds.c
  *

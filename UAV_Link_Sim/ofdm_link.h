@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <vector>
 #include <complex>
@@ -12,20 +12,20 @@ using VecDouble = std::vector<double>;
 
 struct OFDMConfig
 {
-    // ===== À´×Ô parameter.mat / SystemSetup =====
-    int N_fft = 256;          // IFFT/FFT µãÊı
-    int N_cp = 32;            // Ñ­»·Ç°×º³¤¶È
-    int N_sc = 128;           // Êµ¼ÊÊ¹ÓÃµÄÓĞĞ§×ÓÔØ²¨Êı£¨²»º¬ DC£©
-    int Nd = 10;              // Ò»Ö¡ÄÚ OFDM ·ûºÅÊı
-    int N_frm = 1;            // ½ÓÊÕ¶ËÀïÓĞÓÃµ½
-    int N_zeros = 256;        // ·¢ÉäÇ°µ¼Áã
-    int P_f_inter = 6;        // µ¼Æµ¼ä¸ô
-    int M = 4;                // QAM ½×Êı£¬Èç 4/16
-    int L = 7;                // ¾í»ıÂëÔ¼Êø³¤¶È
-    int tblen = 32;           // Î¬ÌØ±È traceback ³¤¶È
-    double delta_f = 15e3;    // ×ÓÔØ²¨¼ä¸ô
+    // ===== æ¥è‡ª parameter.mat / SystemSetup =====
+    int N_fft = 256;          // IFFT/FFT ç‚¹æ•°
+    int N_cp = 32;            // å¾ªç¯å‰ç¼€é•¿åº¦
+    int N_sc = 128;           // å®é™…ä½¿ç”¨çš„æœ‰æ•ˆå­è½½æ³¢æ•°ï¼ˆä¸å« DCï¼‰
+    int Nd = 10;              // ä¸€å¸§å†… OFDM ç¬¦å·æ•°
+    int N_frm = 1;            // æ¥æ”¶ç«¯é‡Œæœ‰ç”¨åˆ°
+    int N_zeros = 256;        // å‘å°„å‰å¯¼é›¶
+    int P_f_inter = 6;        // å¯¼é¢‘é—´éš”
+    int M = 4;                // QAM é˜¶æ•°ï¼Œå¦‚ 4/16
+    int L = 7;                // å·ç§¯ç çº¦æŸé•¿åº¦
+    int tblen = 32;           // ç»´ç‰¹æ¯” traceback é•¿åº¦
+    double delta_f = 15e3;    // å­è½½æ³¢é—´éš”
 
-    // ===== ÅÉÉú²ÎÊı =====
+    // ===== æ´¾ç”Ÿå‚æ•° =====
     int N_symbol() const { return N_cp + N_fft; }
     double sampleRate() const { return N_fft * delta_f; }
     double channelCodingRate() const { return 0.5; }
@@ -76,15 +76,27 @@ class OFDMImageTransmitter
 public:
     explicit OFDMImageTransmitter(const OFDMConfig& cfg);
 
+    std::vector<VecComplex> buildFileFrames(const std::string& filename, const std::vector<uint8_t>& fileBytes);
+    VecComplex buildFileSignal(const std::string& filename, const std::vector<uint8_t>& fileBytes);
     VecComplex buildSingleImageFrame(const GrayImage& image);
+    std::vector<VecComplex> buildImageFrames(const GrayImage& image);
+    VecComplex buildImageSignal(const GrayImage& image);
     VecComplex buildMultiImageSignal(const std::vector<GrayImage>& images);
 
     int calcPayloadBitsPerFrame() const;
+    int calcImageChunkBytesPerFrame() const;
 
 private:
     OFDMConfig cfg_;
 
+    std::vector<VecComplex> buildFramesFromBitstream(const VecInt& bitstream) const;
     VecInt imageToPayloadBits(const GrayImage& image) const;
+    VecInt imageChunkToPayloadBits(
+        const GrayImage& image,
+        uint16_t chunkIndex,
+        uint16_t chunkCount,
+        size_t byteOffset,
+        size_t chunkBytes) const;
     std::vector<std::vector<Complex>> mapToResourceGrid(const VecComplex& qamSyms) const;
     VecComplex buildTimeDomainSignal(const std::vector<std::vector<Complex>>& grid) const;
 };
@@ -94,7 +106,9 @@ class OFDMImageReceiver
 public:
     explicit OFDMImageReceiver(const OFDMConfig& cfg);
 
+    bool receiveFileSignal(const VecComplex& rx, std::string& filename, std::vector<uint8_t>& fileBytes);
     bool receiveOneFrame(const VecComplex& rx, GrayImage& outImg);
+    bool receiveImageSignal(const VecComplex& rx, GrayImage& outImg);
 
 private:
     OFDMConfig cfg_;
@@ -110,4 +124,15 @@ private:
     bool equalizeAndDemod(
         const std::vector<VecComplex>& symbolsNoCP,
         VecInt& hardBitsOut) const;
+    bool decodeFramePayloadAtPss(
+        const VecComplex& rx,
+        int pssPos,
+        VecInt& decodedBits,
+        int& refinedPssPos) const;
+    bool receiveBitstreamFromSignal(const VecComplex& rx, VecInt& bitsOut) const;
+    bool decodeFramePayload(
+        const VecComplex& rx,
+        size_t searchStart,
+        VecInt& decodedBits,
+        size_t& frameStartPos) const;
 };

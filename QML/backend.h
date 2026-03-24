@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QObject>
 #include <QString>
@@ -35,7 +35,7 @@ class Backend : public QObject
     Q_PROPERTY(QVariantList rxSpectrumFreq READ rxSpectrumFreq NOTIFY rxSpectrumChanged)
     Q_PROPERTY(QVariantList rxSpectrumMag READ rxSpectrumMag NOTIFY rxSpectrumChanged)
 
-    // ===== 新增：星座图 =====
+    // ===== 鏂板锛氭槦搴у浘 =====
     Q_PROPERTY(QVariantList constellationI READ constellationI NOTIFY constellationChanged)
     Q_PROPERTY(QVariantList constellationQ READ constellationQ NOTIFY constellationChanged)
 

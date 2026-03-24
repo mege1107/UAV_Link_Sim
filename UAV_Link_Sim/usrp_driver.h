@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/stream.hpp>
@@ -25,7 +25,7 @@ public:
         std::string tx_antenna = "TX/RX";
         std::string rx_antenna = "RX2";
 
-        // ¸ø X310 Ô¤Áô
+        // ç»™ X310 é¢„ç•™
         std::string tx_subdev;
         std::string rx_subdev;
         std::string clock_source;

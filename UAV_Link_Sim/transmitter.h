@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include "common_defs.h"
 #include "coding.h"
@@ -35,13 +35,13 @@ private:
 
     void calculateFS();
 
-    // ±£ÁôÔ­Ëæ»úĞÅÔ´
+    // ä¿ç•™åŸéšæœºä¿¡æº
     VecInt generateRandomSourceData();
 
-    // ĞÂÔöÎÄ¼şĞÅÔ´
+    // æ–°å¢æ–‡ä»¶ä¿¡æº
     VecInt generateFileSourceBits();
 
-    // ÎÄ¼ş¹¤¾ßº¯Êı
+    // æ–‡ä»¶å·¥å…·å‡½æ•°
     static std::string extractFilename(const std::string& fullpath);
     static std::string detectFileExtensionLower(const std::string& filename);
     static int fileTypeFromExtension(const std::string& ext);

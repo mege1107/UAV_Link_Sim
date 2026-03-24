@@ -1,4 +1,4 @@
-#include "backend.h"
+﻿#include "backend.h"
 #include "sim_runner.h"
 
 #include <QtConcurrent/QtConcurrent>
@@ -15,7 +15,7 @@
 
 Backend::Backend(QObject *parent)
     : QObject(parent),
-    m_logText("系统就绪。\n"),
+    m_logText("绯荤粺灏辩华銆俓n"),
     m_berText("N/A"),
     m_selectedMode("MSK"),
     m_centerFreq("400"),
@@ -213,11 +213,11 @@ void Backend::setTransferSource(const QString &source)
     m_transferSource = s;
     emit transferSourceChanged();
 
-    QString showName = "随机比特";
-    if (m_transferSource == "TEXT") showName = "字符";
-    if (m_transferSource == "FILE") showName = "文件";
+    QString showName = "闅忔満姣旂壒";
+    if (m_transferSource == "TEXT") showName = "瀛楃";
+    if (m_transferSource == "FILE") showName = "鏂囦欢";
 
-    appendLog(QString("当前信息源切换为：%1").arg(showName));
+    appendLog(QString("褰撳墠淇℃伅婧愬垏鎹负锛?1").arg(showName));
 }
 
 void Backend::appendLog(const QString &msg)
@@ -243,15 +243,15 @@ QString Backend::currentPayloadDescription() const
         QString text = m_inputText;
         if (text.size() > 40)
             text = text.left(40) + "...";
-        return QString("文本[%1]").arg(text);
+        return QString("鏂囨湰[%1]").arg(text);
     }
 
     if (m_transferSource == "FILE") {
         QFileInfo fi(m_inputFilePath);
-        return QString("文件[%1]").arg(fi.fileName());
+        return QString("鏂囦欢[%1]").arg(fi.fileName());
     }
 
-    return "随机比特";
+    return "闅忔満姣旂壒";
 }
 
 QString Backend::ensureTempTextFile()
@@ -293,7 +293,7 @@ QString Backend::buildRecoveredOutputPath(const QString &srcPath) const
 
 void Backend::applyParameterSettings()
 {
-    appendLog(QString("参数已更新：调制=%1, 中心频率=%2 MHz, 带宽=%3 MHz, 信息速率=%4 Kbps, 跳频图案=%5")
+    appendLog(QString("鍙傛暟宸叉洿鏂帮細璋冨埗=%1, 涓績棰戠巼=%2 MHz, 甯﹀=%3 MHz, 淇℃伅閫熺巼=%4 Kbps, 璺抽鍥炬=%5")
                   .arg(m_selectedMode, m_centerFreq, m_bandwidth, m_infoRate, m_hopPattern));
 }
 
@@ -305,8 +305,8 @@ void Backend::connectUsrp(bool on)
     m_usrpConnected = on;
     emit usrpConnectedChanged();
 
-    appendLog(on ? "USRP B210 已连接，后续任务将走 USRP 模式"
-                 : "USRP B210 已断开，后续任务将走 LOOPBACK 模式");
+    appendLog(on ? "USRP B210 宸茶繛鎺ワ紝鍚庣画浠诲姟灏嗚蛋 USRP 妯″紡"
+                 : "USRP B210 宸叉柇寮€锛屽悗缁换鍔″皢璧?LOOPBACK 妯″紡");
 }
 
 void Backend::sendText()
@@ -314,16 +314,16 @@ void Backend::sendText()
     setTransferSource("TEXT");
 
     if (m_inputText.trimmed().isEmpty()) {
-        appendLog("文本装载失败：输入为空。");
+        appendLog("鏂囨湰瑁呰浇澶辫触锛氳緭鍏ヤ负绌恒€?);
         return;
     }
 
-    appendLog(QString("文本已装载，长度=%1 字符").arg(m_inputText.size()));
+    appendLog(QString("鏂囨湰宸茶杞斤紝闀垮害=%1 瀛楃").arg(m_inputText.size()));
 }
 
 void Backend::browseInputFile()
 {
-    appendLog("QML FileDialog 将负责选文件，当前接口保留。");
+    appendLog("QML FileDialog 灏嗚礋璐ｉ€夋枃浠讹紝褰撳墠鎺ュ彛淇濈暀銆?);
 }
 
 void Backend::sendFile()
@@ -331,13 +331,13 @@ void Backend::sendFile()
     setTransferSource("FILE");
 
     if (m_inputFilePath.trimmed().isEmpty()) {
-        appendLog("文件装载失败：尚未选择文件。");
+        appendLog("鏂囦欢瑁呰浇澶辫触锛氬皻鏈€夋嫨鏂囦欢銆?);
         return;
     }
 
     QFileInfo fi(m_inputFilePath);
-    appendLog(QString("文件已装载：%1").arg(fi.fileName()));
-    appendLog(QString("完整路径：%1").arg(m_inputFilePath));
+    appendLog(QString("鏂囦欢宸茶杞斤細%1").arg(fi.fileName()));
+    appendLog(QString("瀹屾暣璺緞锛?1").arg(m_inputFilePath));
 }
 
 void Backend::startSending(bool on)
@@ -346,24 +346,24 @@ void Backend::startSending(bool on)
         if (m_sending) {
             m_sending = false;
             emit sendingChanged();
-            appendLog("发送已停止。");
+            appendLog("鍙戦€佸凡鍋滄銆?);
         }
         return;
     }
 
     if (!payloadReady()) {
-        appendLog("发送失败：当前没有可发送的数据。");
+        appendLog("鍙戦€佸け璐ワ細褰撳墠娌℃湁鍙彂閫佺殑鏁版嵁銆?);
         if (m_transferSource == "TEXT")
-            appendLog("请先输入文本。");
+            appendLog("璇峰厛杈撳叆鏂囨湰銆?);
         else if (m_transferSource == "FILE")
-            appendLog("请先选择文件。");
+            appendLog("璇峰厛閫夋嫨鏂囦欢銆?);
         else
-            appendLog("当前数据源异常。");
+            appendLog("褰撳墠鏁版嵁婧愬紓甯搞€?);
         return;
     }
 
     if (m_isRunning) {
-        appendLog("系统忙：当前任务尚未结束。");
+        appendLog("绯荤粺蹇欙細褰撳墠浠诲姟灏氭湭缁撴潫銆?);
         return;
     }
 
@@ -376,7 +376,7 @@ void Backend::startSending(bool on)
 void Backend::runSimulation()
 {
     if (m_isRunning) {
-        appendLog("仿真正在运行，请勿重复点击。");
+        appendLog("浠跨湡姝ｅ湪杩愯锛岃鍕块噸澶嶇偣鍑汇€?);
         return;
     }
 
@@ -390,7 +390,7 @@ void Backend::runSimulation()
     const ModulationType modulation = parse_modulation(modStr);
     const RunMode runMode = m_usrpConnected ? RunMode::USRP : RunMode::LOOPBACK;
 
-    appendLog(QString("开始运行随机比特 BER 测试：模式=%1, 调制=%2, Fc=%3 MHz, 信息速率=%4 Kbps, 跳频图案=%5")
+    appendLog(QString("寮€濮嬭繍琛岄殢鏈烘瘮鐗?BER 娴嬭瘯锛氭ā寮?%1, 璋冨埗=%2, Fc=%3 MHz, 淇℃伅閫熺巼=%4 Kbps, 璺抽鍥炬=%5")
                   .arg(m_usrpConnected ? "USRP" : "LOOPBACK",
                        m_selectedMode,
                        m_centerFreq,
@@ -414,7 +414,7 @@ void Backend::runSimulation()
             }, Qt::QueuedConnection);
         }
         catch (const std::exception &e) {
-            const QString err = QString("任务失败: %1").arg(e.what());
+            const QString err = QString("浠诲姟澶辫触: %1").arg(e.what());
             QMetaObject::invokeMethod(this, [this, err]() {
                 m_isRunning = false;
                 appendLog(err);
@@ -427,7 +427,7 @@ void Backend::runSimulation()
         catch (...) {
             QMetaObject::invokeMethod(this, [this]() {
                 m_isRunning = false;
-                appendLog("任务失败: Unknown exception");
+                appendLog("浠诲姟澶辫触: Unknown exception");
                 if (m_sending) {
                     m_sending = false;
                     emit sendingChanged();
@@ -440,12 +440,12 @@ void Backend::runSimulation()
 void Backend::runCurrentTask(bool fromSendingAction)
 {
     if (m_isRunning) {
-        appendLog("任务正在运行，请勿重复触发。");
+        appendLog("浠诲姟姝ｅ湪杩愯锛岃鍕块噸澶嶈Е鍙戙€?);
         return;
     }
 
     if (!payloadReady()) {
-        appendLog("任务启动失败：当前数据未准备好。");
+        appendLog("浠诲姟鍚姩澶辫触锛氬綋鍓嶆暟鎹湭鍑嗗濂姐€?);
         return;
     }
 
@@ -459,9 +459,9 @@ void Backend::runCurrentTask(bool fromSendingAction)
     const ModulationType modulation = parse_modulation(modStr);
     const RunMode runMode = m_usrpConnected ? RunMode::USRP : RunMode::LOOPBACK;
 
-    const QString actionName = fromSendingAction ? "开始发送" : "开始运行任务";
+    const QString actionName = fromSendingAction ? "寮€濮嬪彂閫? : "寮€濮嬭繍琛屼换鍔?;
 
-    appendLog(QString("%1：模式=%2, 调制=%3, Fc=%4 MHz, 信息速率=%5 Kbps, 跳频图案=%6, 数据源=%7")
+    appendLog(QString("%1锛氭ā寮?%2, 璋冨埗=%3, Fc=%4 MHz, 淇℃伅閫熺巼=%5 Kbps, 璺抽鍥炬=%6, 鏁版嵁婧?%7")
                   .arg(actionName)
                   .arg(m_usrpConnected ? "USRP" : "LOOPBACK")
                   .arg(m_selectedMode)
@@ -489,7 +489,7 @@ void Backend::runCurrentTask(bool fromSendingAction)
                 }, Qt::QueuedConnection);
             }
             catch (const std::exception &e) {
-                const QString err = QString("任务失败: %1").arg(e.what());
+                const QString err = QString("浠诲姟澶辫触: %1").arg(e.what());
                 QMetaObject::invokeMethod(this, [this, err]() {
                     m_isRunning = false;
                     appendLog(err);
@@ -502,7 +502,7 @@ void Backend::runCurrentTask(bool fromSendingAction)
             catch (...) {
                 QMetaObject::invokeMethod(this, [this]() {
                     m_isRunning = false;
-                    appendLog("任务失败: Unknown exception");
+                    appendLog("浠诲姟澶辫触: Unknown exception");
                     if (m_sending) {
                         m_sending = false;
                         emit sendingChanged();
@@ -517,14 +517,14 @@ void Backend::runCurrentTask(bool fromSendingAction)
     QString inputPath;
     if (m_transferSource == "TEXT") {
         inputPath = ensureTempTextFile();
-        appendLog(QString("文本已写入临时文件：%1").arg(inputPath));
+        appendLog(QString("鏂囨湰宸插啓鍏ヤ复鏃舵枃浠讹細%1").arg(inputPath));
     } else {
         inputPath = m_inputFilePath;
     }
 
     const QString outputPath = buildRecoveredOutputPath(inputPath);
 
-    appendLog(QString("接收恢复文件将保存到：%1").arg(outputPath));
+    appendLog(QString("鎺ユ敹鎭㈠鏂囦欢灏嗕繚瀛樺埌锛?1").arg(outputPath));
 
     QtConcurrent::run([this, centerFreqHz, infoRateBps, hopPattern, modulation, runMode, inputPath, outputPath]() {
         try {
@@ -544,7 +544,7 @@ void Backend::runCurrentTask(bool fromSendingAction)
             }, Qt::QueuedConnection);
         }
         catch (const std::exception &e) {
-            const QString err = QString("任务失败: %1").arg(e.what());
+            const QString err = QString("浠诲姟澶辫触: %1").arg(e.what());
             QMetaObject::invokeMethod(this, [this, err]() {
                 m_isRunning = false;
                 appendLog(err);
@@ -557,7 +557,7 @@ void Backend::runCurrentTask(bool fromSendingAction)
         catch (...) {
             QMetaObject::invokeMethod(this, [this]() {
                 m_isRunning = false;
-                appendLog("任务失败: Unknown exception");
+                appendLog("浠诲姟澶辫触: Unknown exception");
                 if (m_sending) {
                     m_sending = false;
                     emit sendingChanged();
@@ -702,22 +702,22 @@ void Backend::handleSimulationFinished()
         appendLog(QString::fromStdString(tr.log_text));
 
         if (tr.file_saved) {
-            appendLog(QString("文件恢复成功：%1").arg(QString::fromStdString(tr.saved_file_path)));
+            appendLog(QString("鏂囦欢鎭㈠鎴愬姛锛?1").arg(QString::fromStdString(tr.saved_file_path)));
         }
 
-        appendLog(QString("任务完成，BER=%1").arg(m_berText));
+        appendLog(QString("浠诲姟瀹屾垚锛孊ER=%1").arg(m_berText));
     }
     catch (const std::exception &e) {
-        appendLog(QString("任务失败: %1").arg(e.what()));
+        appendLog(QString("浠诲姟澶辫触: %1").arg(e.what()));
     }
     catch (...) {
-        appendLog("任务失败: Unknown exception");
+        appendLog("浠诲姟澶辫触: Unknown exception");
     }
 
     if (m_sending) {
         m_sending = false;
         emit sendingChanged();
-        appendLog("本次发送流程结束。");
+        appendLog("鏈鍙戦€佹祦绋嬬粨鏉熴€?);
     }
 }
 
@@ -887,16 +887,16 @@ void Backend::applyTestResult(const TestResult &tr)
     appendLog(QString::fromStdString(tr.log_text));
 
     if (tr.file_saved) {
-        appendLog(QString("文件恢复成功：%1").arg(QString::fromStdString(tr.saved_file_path)));
+        appendLog(QString("鏂囦欢鎭㈠鎴愬姛锛?1").arg(QString::fromStdString(tr.saved_file_path)));
     }
 
-    appendLog(QString("任务完成，BER=%1").arg(m_berText));
+    appendLog(QString("浠诲姟瀹屾垚锛孊ER=%1").arg(m_berText));
 
     m_isRunning = false;
 
     if (m_sending) {
         m_sending = false;
         emit sendingChanged();
-        appendLog("本次发送流程结束。");
+        appendLog("鏈鍙戦€佹祦绋嬬粨鏉熴€?);
     }
 }

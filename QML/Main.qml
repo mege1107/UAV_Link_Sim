@@ -1,4 +1,4 @@
-import QtQuick
+﻿import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtCharts
@@ -11,7 +11,7 @@ ApplicationWindow {
     height: 920
     minimumWidth: 1300
     minimumHeight: 760
-    title: "无人机通信链路仿真系统(地面站)"
+    title: "鏃犱汉鏈洪€氫俊閾捐矾浠跨湡绯荤粺(鍦伴潰绔?"
     color: "#f3f3f3"
 
     ButtonGroup {
@@ -20,7 +20,7 @@ ApplicationWindow {
 
     FileDialog {
         id: inputFileDialog
-        title: "选择待发送文件"
+        title: "閫夋嫨寰呭彂閫佹枃浠?
 
         onAccepted: {
             backend.inputFilePath = selectedFile.toString()
@@ -63,7 +63,7 @@ ApplicationWindow {
                     if (N < 1) {
                         ctx.fillStyle = "#777777"
                         ctx.font = "18px sans-serif"
-                        ctx.fillText("暂无星座图数据", width / 2 - 60, height / 2)
+                        ctx.fillText("鏆傛棤鏄熷骇鍥炬暟鎹?, width / 2 - 60, height / 2)
                         return
                     }
 
@@ -180,10 +180,10 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 currentIndex: 0
 
-                TabButton { text: "时频分析" }
-                TabButton { text: "波形图" }
-                TabButton { text: "频谱图" }
-                TabButton { text: "星座图" }
+                TabButton { text: "鏃堕鍒嗘瀽" }
+                TabButton { text: "娉㈠舰鍥? }
+                TabButton { text: "棰戣氨鍥? }
+                TabButton { text: "鏄熷骇鍥? }
             }
 
             StackLayout {
@@ -525,9 +525,9 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 currentIndex: 0
 
-                TabButton { text: "接收端波形图" }
-                TabButton { text: "接收端频谱图" }
-                TabButton { text: "星座图" }
+                TabButton { text: "鎺ユ敹绔尝褰㈠浘" }
+                TabButton { text: "鎺ユ敹绔璋卞浘" }
+                TabButton { text: "鏄熷骇鍥? }
             }
 
             StackLayout {
@@ -777,7 +777,7 @@ ApplicationWindow {
 
         Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "无人机通信链路仿真系统(地面站)"
+            text: "鏃犱汉鏈洪€氫俊閾捐矾浠跨湡绯荤粺(鍦伴潰绔?"
             font.pixelSize: 34
             font.bold: true
             color: "black"
@@ -800,15 +800,15 @@ ApplicationWindow {
                     id: modeTab
                     Layout.fillWidth: true
 
-                    TabButton { text: "遥控" }
-                    TabButton { text: "遥测" }
-                    TabButton { text: "图传" }
+                    TabButton { text: "閬ユ帶" }
+                    TabButton { text: "閬ユ祴" }
+                    TabButton { text: "鍥句紶" }
                 }
 
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 165
-                    title: "参数设置"
+                    title: "鍙傛暟璁剧疆"
 
                     contentItem: Component {
                         GridLayout {
@@ -818,7 +818,7 @@ ApplicationWindow {
                             rowSpacing: 12
                             columnSpacing: 10
 
-                            Label { text: "调制方式"; font.pixelSize: 15 }
+                            Label { text: "璋冨埗鏂瑰紡"; font.pixelSize: 15 }
                             ComboBox {
                                 Layout.preferredWidth: 130
                                 model: ["MSK", "BPSK", "QPSK", "QAM", "OOK", "FSK", "FM"]
@@ -826,7 +826,7 @@ ApplicationWindow {
                                 onActivated: backend.selectedMode = currentText
                             }
 
-                            Label { text: "中心频率"; font.pixelSize: 15 }
+                            Label { text: "涓績棰戠巼"; font.pixelSize: 15 }
                             RowLayout {
                                 TextField {
                                     Layout.preferredWidth: 90
@@ -836,7 +836,7 @@ ApplicationWindow {
                                 Label { text: "MHz"; font.pixelSize: 15 }
                             }
 
-                            Label { text: "跳频图案"; font.pixelSize: 15 }
+                            Label { text: "璺抽鍥炬"; font.pixelSize: 15 }
                             ComboBox {
                                 Layout.preferredWidth: 130
                                 model: ["1", "2", "3", "4"]
@@ -844,7 +844,7 @@ ApplicationWindow {
                                 onActivated: backend.hopPattern = currentText
                             }
 
-                            Label { text: "信息速率"; font.pixelSize: 15 }
+                            Label { text: "淇℃伅閫熺巼"; font.pixelSize: 15 }
                             RowLayout {
                                 ComboBox {
                                     Layout.preferredWidth: 110
@@ -857,7 +857,7 @@ ApplicationWindow {
 
                             Item { Layout.columnSpan: 3 }
                             Button {
-                                text: "应用参数"
+                                text: "搴旂敤鍙傛暟"
                                 Layout.preferredWidth: 110
                                 onClicked: backend.applyParameterSettings()
                             }
@@ -868,7 +868,7 @@ ApplicationWindow {
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 95
-                    title: "硬件(USRP B210)连接"
+                    title: "纭欢(USRP B210)杩炴帴"
 
                     contentItem: Component {
                         RowLayout {
@@ -876,14 +876,14 @@ ApplicationWindow {
                             anchors.margins: 14
                             spacing: 16
 
-                            Label { text: "连接"; font.pixelSize: 15 }
+                            Label { text: "杩炴帴"; font.pixelSize: 15 }
 
                             StatusLamp {
                                 lampColor: backend.usrpConnected ? "#18c25c" : "red"
                             }
 
                             Label {
-                                text: backend.usrpConnected ? "打开" : "关闭"
+                                text: backend.usrpConnected ? "鎵撳紑" : "鍏抽棴"
                                 font.pixelSize: 15
                                 color: backend.usrpConnected ? "#18a14c" : "#666666"
                             }
@@ -896,7 +896,7 @@ ApplicationWindow {
                             Item { Layout.fillWidth: true }
 
                             Button {
-                                text: "运行联调"
+                                text: "杩愯鑱旇皟"
                                 onClicked: backend.runSimulation()
                             }
                         }
@@ -906,7 +906,7 @@ ApplicationWindow {
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 165
-                    title: "信息传输"
+                    title: "淇℃伅浼犺緭"
 
                     contentItem: Component {
                         ColumnLayout {
@@ -920,7 +920,7 @@ ApplicationWindow {
                                 RadioButton {
                                     id: textMode
                                     checked: false
-                                    text: "字符"
+                                    text: "瀛楃"
                                     ButtonGroup.group: transferGroup
                                     onCheckedChanged: {
                                         if (checked) backend.setTransferSource("TEXT")
@@ -929,14 +929,14 @@ ApplicationWindow {
 
                                 TextField {
                                     Layout.fillWidth: true
-                                    placeholderText: "请输入待发送文本"
+                                    placeholderText: "璇疯緭鍏ュ緟鍙戦€佹枃鏈?
                                     text: backend.inputText
                                     onTextChanged: backend.inputText = text
                                     enabled: textMode.checked
                                 }
 
                                 Button {
-                                    text: "输入"
+                                    text: "杈撳叆"
                                     enabled: textMode.checked
                                     onClicked: backend.sendText()
                                 }
@@ -947,7 +947,7 @@ ApplicationWindow {
 
                                 RadioButton {
                                     id: fileMode
-                                    text: "文件"
+                                    text: "鏂囦欢"
                                     ButtonGroup.group: transferGroup
                                     onCheckedChanged: {
                                         if (checked) backend.setTransferSource("FILE")
@@ -957,7 +957,7 @@ ApplicationWindow {
                                 TextField {
                                     id: filePathField
                                     Layout.fillWidth: true
-                                    placeholderText: "请输入或选择待发送文件"
+                                    placeholderText: "璇疯緭鍏ユ垨閫夋嫨寰呭彂閫佹枃浠?
                                     text: backend.inputFilePath
                                     readOnly: false
                                     enabled: fileMode.checked
@@ -965,7 +965,7 @@ ApplicationWindow {
                                 }
 
                                 Button {
-                                    text: "读取"
+                                    text: "璇诲彇"
                                     enabled: fileMode.checked
                                     onClicked: inputFileDialog.open()
                                 }
@@ -973,8 +973,8 @@ ApplicationWindow {
 
                             Label {
                                 text: textMode.checked
-                                      ? (backend.inputText === "" ? "等待输入文本" : "文本已就绪")
-                                      : (backend.inputFilePath === "" ? "等待选择文件" : "文件已就绪")
+                                      ? (backend.inputText === "" ? "绛夊緟杈撳叆鏂囨湰" : "鏂囨湰宸插氨缁?)
+                                      : (backend.inputFilePath === "" ? "绛夊緟閫夋嫨鏂囦欢" : "鏂囦欢宸插氨缁?)
                                 color: "#ff5a5a"
                                 font.pixelSize: 14
                                 font.bold: true
@@ -986,7 +986,7 @@ ApplicationWindow {
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 105
-                    title: "遥控信号发送"
+                    title: "閬ユ帶淇″彿鍙戦€?
 
                     contentItem: Component {
                         RowLayout {
@@ -994,14 +994,14 @@ ApplicationWindow {
                             anchors.margins: 14
                             spacing: 16
 
-                            Label { text: "发送"; font.pixelSize: 15 }
+                            Label { text: "鍙戦€?; font.pixelSize: 15 }
 
                             StatusLamp {
                                 lampColor: backend.sending ? "#18c25c" : "red"
                             }
 
                             Label {
-                                text: backend.sending ? "打开" : "关闭"
+                                text: backend.sending ? "鎵撳紑" : "鍏抽棴"
                                 font.pixelSize: 15
                                 color: backend.sending ? "#18a14c" : "#666666"
                             }
@@ -1012,7 +1012,7 @@ ApplicationWindow {
                             }
 
                             Button {
-                                text: "发送文件"
+                                text: "鍙戦€佹枃浠?
                                 enabled: fileMode.checked && backend.inputFilePath !== ""
                                 onClicked: {
                                     backend.sendFile()
@@ -1023,7 +1023,7 @@ ApplicationWindow {
                             Item { Layout.fillWidth: true }
 
                             Label {
-                                text: backend.sending ? "发送中" : "等待操作"
+                                text: backend.sending ? "鍙戦€佷腑" : "绛夊緟鎿嶄綔"
                                 color: "#ff5a5a"
                                 font.pixelSize: 17
                                 font.bold: true
@@ -1035,7 +1035,7 @@ ApplicationWindow {
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 85
-                    title: "结果"
+                    title: "缁撴灉"
 
                     contentItem: Component {
                         RowLayout {
@@ -1059,7 +1059,7 @@ ApplicationWindow {
                             Item { Layout.fillWidth: true }
 
                             Button {
-                                text: "运行一次"
+                                text: "杩愯涓€娆?
                                 onClicked: backend.runSimulation()
                             }
                         }
@@ -1070,7 +1070,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.minimumHeight: 160
-                    title: "运行日志"
+                    title: "杩愯鏃ュ織"
 
                     contentItem: Component {
                         ScrollView {
@@ -1112,7 +1112,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 220
                         Layout.preferredWidth: 300
-                        title: "系统示意"
+                        title: "绯荤粺绀烘剰"
 
                         contentItem: Component {
                             Rectangle {
@@ -1135,7 +1135,7 @@ ApplicationWindow {
                                 Text {
                                     anchors.centerIn: parent
                                     visible: systemImage.status === Image.Error
-                                    text: "系统示意图加载失败"
+                                    text: "绯荤粺绀烘剰鍥惧姞杞藉け璐?
                                     color: "#aa4444"
                                     font.pixelSize: 20
                                 }
@@ -1148,7 +1148,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 480
                         Layout.preferredWidth: 700
-                        title: "帧结构"
+                        title: "甯х粨鏋?
 
                         contentItem: Component {
                             ColumnLayout {
@@ -1163,21 +1163,21 @@ ApplicationWindow {
                                     spacing: 6
 
                                     FrameBlock {
-                                        label: "同步头"
+                                        label: "鍚屾澶?
                                         blockColor: "#ea812d"
                                         width: 130
                                         height: 50
                                     }
 
                                     FrameBlock {
-                                        label: "数据"
+                                        label: "鏁版嵁"
                                         blockColor: "#446fc9"
                                         width: 300
                                         height: 50
                                     }
 
                                     FrameBlock {
-                                        label: "补零"
+                                        label: "琛ラ浂"
                                         blockColor: "#79c341"
                                         width: 120
                                         height: 50
@@ -1201,7 +1201,7 @@ ApplicationWindow {
                 SectionBox {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    title: modeTab.currentIndex === 1 ? "遥测信号分析" : "信号分析"
+                    title: modeTab.currentIndex === 1 ? "閬ユ祴淇″彿鍒嗘瀽" : "淇″彿鍒嗘瀽"
 
                     contentItem: modeTab.currentIndex === 1 ? telemetryAnalysisComponent : controlAnalysisComponent
                 }

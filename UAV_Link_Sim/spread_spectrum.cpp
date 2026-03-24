@@ -1,34 +1,34 @@
-#include "spread_spectrum.h"
+ï»¿#include "spread_spectrum.h"
 #include "utils.h" 
 #include <algorithm>
 #include <stdexcept>
 
-// CCSK (32,5) ÈíÀ©Æµ
+// CCSK (32,5) è½¯æ‰©é¢‘
 VecInt ZCY_CCSK32(const VecInt& encoded_msg, const VecInt& ccskcode) {
     if (ccskcode.size() != 32) {
         throw std::invalid_argument("CCSK code must be 32 bits long");
     }
 
     VecInt spread;
-    // Ã¿5¸öbitÎªÒ»×é½øĞĞÓ³Éä
+    // æ¯5ä¸ªbitä¸ºä¸€ç»„è¿›è¡Œæ˜ å°„
     for (size_t i = 0; i < encoded_msg.size(); i += 5) {
         VecInt bits(5, 0);
-        // È¡5bit (²»×ã²¹0)
+        // å–5bit (ä¸è¶³è¡¥0)
         for (int j = 0; j < 5 && (i + j) < encoded_msg.size(); ++j) {
             bits[j] = encoded_msg[i + j];
         }
 
-        // 5bit×ª0-31µÄË÷Òı
+        // 5bitè½¬0-31çš„ç´¢å¼•
         int k = bi2de(bits, true);
 
-        // Ñ­»·ÓÒÒÆkÎ» (Link16 CCSKÓ³Éä)
+        // å¾ªç¯å³ç§»kä½ (Link16 CCSKæ˜ å°„)
         VecInt chip(32);
         for (int j = 0; j < 32; ++j) {
-            int idx = (j - k + 32) % 32; // ÓÒÒÆkÎ»
+            int idx = (j - k + 32) % 32; // å³ç§»kä½
             chip[j] = ccskcode[idx];
         }
 
-        // Æ´½Óµ½½á¹û
+        // æ‹¼æ¥åˆ°ç»“æœ
         spread.insert(spread.end(), chip.begin(), chip.end());
     }
     return spread;

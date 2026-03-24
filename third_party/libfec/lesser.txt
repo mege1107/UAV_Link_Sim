@@ -1,4 +1,4 @@
-This package is copyright 2006 by Phil Karn, KA9Q.
+﻿This package is copyright 2006 by Phil Karn, KA9Q.
 
 		GNU LESSER GENERAL PUBLIC LICENSE
 		       Version 2.1, February 1999
