@@ -1,100 +1,178 @@
-﻿#include <iostream>
+#include <iostream>
 #include <iomanip>
-#include <algorithm>
-#include <fstream>
-#include <iterator>
+#include <stdexcept>
+#include <string>
 
-#include "ofdm_link.h"
-#include "channel.h"
+#include "sim_runner.h"
+
+namespace {
+
+enum class TestChain {
+    SingleCarrierRandomBits,
+    SingleCarrierFileTransfer,
+    OfdmRandomBits,
+    OfdmFileTransfer
+};
+
+const char* test_chain_to_string(TestChain chain)
+{
+    switch (chain) {
+    case TestChain::SingleCarrierRandomBits: return "SingleCarrier RandomBits";
+    case TestChain::SingleCarrierFileTransfer: return "SingleCarrier FileTransfer";
+    case TestChain::OfdmRandomBits:          return "OFDM RandomBits";
+    case TestChain::OfdmFileTransfer:        return "OFDM FileTransfer";
+    default:                                 return "Unknown";
+    }
+}
+
+void print_result_summary(const TestResult& tr)
+{
+    std::cout << std::scientific << std::setprecision(6)
+        << "BER=" << tr.total_ber
+        << std::defaultfloat
+        << " | bit_errors=" << tr.total_bit_errors
+        << " | compared_bits=" << tr.total_compared_bits
+        << " | decoded_frames=" << tr.decoded_frames
+        << "\n";
+
+    if (!tr.saved_file_path.empty()) {
+        std::cout << "file_saved=" << (tr.file_saved ? 1 : 0)
+            << " | saved_path=" << tr.saved_file_path << "\n";
+    }
+}
+
+} // namespace
 
 int main()
 {
     try
     {
-        OFDMConfig cfg;
-        cfg.N_fft = 256;
-        cfg.N_cp = 32;
-        cfg.N_sc = 128;
-        cfg.Nd = 10;
-        cfg.N_frm = 1;
-        cfg.N_zeros = 256;
-        cfg.P_f_inter = 6;
-        cfg.M = 4;
-        cfg.L = 7;
-        cfg.tblen = 32;
-        cfg.delta_f = 15e3;
+        // =========================
+        // Unified test entry config
+        // =========================
+        constexpr TestChain kChain = TestChain::SingleCarrierRandomBits;
+        constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
+        constexpr bool kPrintLogText = true;
 
-        const std::string input_path = "D:\\linksim\\test_files\\test2.jpg";
-        const std::string output_path = "D:\\linksim\\test_files\\out9.jpg";
+        constexpr double kAwgnSnrDb = 20.0;
+        constexpr double kCenterFreqHz = 2.45e9;
+        const std::string kUsrpDeviceArgs = "type=b200";
 
-        std::ifstream ifs(input_path, std::ios::binary);
-        if (!ifs) {
-            throw std::runtime_error("Cannot open input file: " + input_path);
+        // Single-carrier parameters
+        constexpr ModulationType kSingleCarrierModulation = ModulationType::BPSK;
+        constexpr int kTxRepeatFrames = 100;
+        constexpr double kInfoRateBps = 64000.0;
+        constexpr int kHopPattern = 0;
+
+        // File paths
+        const std::string kInputFilePath =  "D:\\linksim\\test_files\\test.txt";
+        const std::string kOutputFilePath = "D:\\linksim\\test_files\\out_main.txt";
+
+        // OFDM channel impairments used in AWGN mode
+        ChannelConfig ofdmChannelCfg;
+        ofdmChannelCfg.enable_awgn = true;
+        ofdmChannelCfg.snr_dB = kAwgnSnrDb;
+        ofdmChannelCfg.seed = 123;
+        ofdmChannelCfg.enable_sto = false;
+        ofdmChannelCfg.sto_samp = 0;
+        ofdmChannelCfg.enable_cfo = false;
+        ofdmChannelCfg.cfo_hz = 0.0;
+        ofdmChannelCfg.enable_sfo = false;
+        ofdmChannelCfg.sfo_ppm = 0.0;
+
+        TestResult tr;
+
+        switch (kChain) {
+        case TestChain::SingleCarrierRandomBits:
+            tr = run_one_test(
+                kMode,
+                kAwgnSnrDb,
+                kTxRepeatFrames,
+                kCenterFreqHz,
+                kSingleCarrierModulation,
+                kInfoRateBps,
+                kHopPattern);
+            break;
+
+        case TestChain::SingleCarrierFileTransfer:
+            tr = run_file_transfer_test(
+                kMode,
+                kAwgnSnrDb,
+                kCenterFreqHz,
+                kSingleCarrierModulation,
+                kInfoRateBps,
+                kHopPattern,
+                kInputFilePath,
+                kOutputFilePath);
+            break;
+
+        case TestChain::OfdmRandomBits:
+            tr = run_ofdm_random_bit_test(
+                kMode,
+                kAwgnSnrDb,
+                kCenterFreqHz,
+                kUsrpDeviceArgs,
+                ofdmChannelCfg);
+            break;
+
+        case TestChain::OfdmFileTransfer:
+            tr = run_ofdm_file_transfer_test(
+                kMode,
+                kAwgnSnrDb,
+                kCenterFreqHz,
+                kInputFilePath,
+                kOutputFilePath,
+                kUsrpDeviceArgs,
+                ofdmChannelCfg);
+            break;
+
+        default:
+            throw std::runtime_error("Unsupported test chain");
         }
 
-        std::vector<unsigned char> file_bytes{
-            std::istreambuf_iterator<char>(ifs),
-            std::istreambuf_iterator<char>()};
-        if (file_bytes.empty()) {
-            throw std::runtime_error("Input file is empty: " + input_path);
-        }
-        OFDMImageTransmitter tx(cfg);
-        OFDMImageReceiver rx(cfg);
-        std::vector<VecComplex> tx_frames = tx.buildFileFrames("test2.jpg", file_bytes);
-        VecComplex tx_sig = tx.buildFileSignal("test2.jpg", file_bytes);
-
-        ChannelConfig ch;
-        ch.enable_awgn = true;
-        ch.snr_dB = 20.0;
-        ch.seed = 123;
-        ch.enable_sto = false;
-        ch.enable_cfo = false;
-        ch.enable_sfo = false;
-
-        VecComplex rx_sig = Channel::process(tx_sig, ch, cfg.sampleRate());
-
-        std::string rx_name;
-        std::vector<uint8_t> rx_file_bytes;
-        const bool ok = rx.receiveFileSignal(rx_sig, rx_name, rx_file_bytes);
-
         std::cout << "============================\n";
-        std::cout << "  OFDM FILE-LIKE IMAGE TEST\n";
+        std::cout << "  UNIFIED LINK TEST ENTRY\n";
         std::cout << "============================\n";
-        std::cout << std::fixed << std::setprecision(3)
-            << "SNR=" << ch.snr_dB << " dB"
-            << " | input_bytes=" << file_bytes.size()
-            << " | tx_frames=" << tx_frames.size()
-            << " | rx_ok=" << (ok ? 1 : 0)
-            << " | rx_name=" << rx_name
-            << " | rx_bytes=" << rx_file_bytes.size()
+        std::cout << "chain=" << test_chain_to_string(kChain)
+            << " | mode=" << mode_to_string(kMode)
+            << " | snr_dB=" << std::fixed << std::setprecision(3) << kAwgnSnrDb
+            << " | center_freq_hz=" << kCenterFreqHz
             << "\n";
 
-        if (ok) {
-            size_t diff_cnt = 0;
-            const size_t n = std::min(file_bytes.size(), rx_file_bytes.size());
-            for (size_t i = 0; i < n; ++i) {
-                if (file_bytes[i] != rx_file_bytes[i]) diff_cnt++;
-            }
-
-            std::cout << "byte_errors=" << diff_cnt
-                << " | compared_bytes=" << n
+        if (kChain == TestChain::SingleCarrierRandomBits ||
+            kChain == TestChain::SingleCarrierFileTransfer) {
+            std::cout << "modulation=" << modulation_to_string(kSingleCarrierModulation)
+                << " | info_rate_bps=" << kInfoRateBps
+                << " | hop_pattern=" << kHopPattern
                 << "\n";
+        }
 
-            std::ofstream ofs(output_path, std::ios::binary);
-            if (!ofs) {
-                throw std::runtime_error("Cannot open output file: " + output_path);
-            }
-            ofs.write(
-                reinterpret_cast<const char*>(rx_file_bytes.data()),
-                static_cast<std::streamsize>(rx_file_bytes.size()));
-            ofs.close();
+        if (kChain == TestChain::SingleCarrierFileTransfer ||
+            kChain == TestChain::OfdmFileTransfer) {
+            std::cout << "input_file=" << kInputFilePath
+                << " | output_file=" << kOutputFilePath
+                << "\n";
+        }
 
-            std::cout << "saved_to=" << output_path << "\n";
+        if (kChain == TestChain::OfdmRandomBits ||
+            kChain == TestChain::OfdmFileTransfer) {
+            std::cout << "ofdm_sto=" << ofdmChannelCfg.sto_samp
+                << " | ofdm_cfo_hz=" << ofdmChannelCfg.cfo_hz
+                << " | ofdm_sfo_ppm=" << ofdmChannelCfg.sfo_ppm
+                << "\n";
+        }
+
+        print_result_summary(tr);
+
+        if (kPrintLogText && !tr.log_text.empty()) {
+            std::cout << "\n----- LOG TEXT -----\n";
+            std::cout << tr.log_text;
         }
     }
     catch (const std::exception& e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl;
+        return 1;
     }
 
     return 0;

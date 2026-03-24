@@ -109,7 +109,19 @@ SweepResult run_awgn_sweep(
 );
 
 TestResult run_ofdm_random_bit_test(
+    RunMode mode,
     double awgn_snr_db,
+    double center_freq_hz = 915e6,
+    const std::string& usrp_device_args = "type=b200",
+    const ChannelConfig& ch_cfg = ChannelConfig{});
+
+TestResult run_ofdm_file_transfer_test(
+    RunMode mode,
+    double awgn_snr_db,
+    double center_freq_hz,
+    const std::string& input_file_path,
+    const std::string& output_file_path,
+    const std::string& usrp_device_args = "type=b200",
     const ChannelConfig& ch_cfg = ChannelConfig{});
 
 TestResult run_channel_test(

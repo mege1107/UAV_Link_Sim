@@ -9,12 +9,13 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <iterator>
 
 #include "transmitter.h"
 #include "receiver.h"
 #include "channel.h"
 
-//#define WITH_UHD
+#define WITH_UHD
 #ifdef WITH_UHD
 #include "usrp_driver.h"
 #endif
@@ -347,6 +348,33 @@ static unsigned long long read_u64_be(const std::vector<unsigned char>& data, si
         v = (v << 8) | static_cast<unsigned long long>(data[pos + i]);
     }
     return v;
+}
+
+static VecComplex transceive_usrp_burst(
+    const std::string& device_args,
+    double sample_rate,
+    double center_freq_hz,
+    const VecComplex& tx_burst)
+{
+#ifdef WITH_UHD
+    USRPDriver::Config uc;
+    uc.device_args = device_args;
+    uc.sample_rate = sample_rate;
+    uc.center_freq = center_freq_hz;
+
+    USRPDriver usrp(uc);
+    usrp.init();
+    usrp.start_rx_worker(tx_burst.size());
+    usrp.send_burst(tx_burst);
+    usrp.wait_rx_worker();
+    return usrp.fetch_rx_buffer();
+#else
+    (void)device_args;
+    (void)sample_rate;
+    (void)center_freq_hz;
+    (void)tx_burst;
+    throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
+#endif
 }
 
 static bool recover_file_from_bits(
@@ -1215,7 +1243,10 @@ SweepResult run_awgn_sweep(
 #include <random>
 
 TestResult run_ofdm_random_bit_test(
+    RunMode mode,
     double awgn_snr_db,
+    double center_freq_hz,
+    const std::string& usrp_device_args,
     const ChannelConfig& ch_cfg)
 {
     std::ostringstream log;
@@ -1328,16 +1359,32 @@ TestResult run_ofdm_random_bit_test(
         tx_sig.insert(tx_sig.end(), pss.begin(), pss.end());
         tx_sig.insert(tx_sig.end(), tx_data.begin(), tx_data.end());
 
-        ChannelConfig cfg_local = ch_cfg;
-        cfg_local.snr_dB = awgn_snr_db;
-
-        if (cfg_local.enable_sto && cfg_local.sto_samp > 0) {
-            const size_t tail_guard =
-                static_cast<size_t>(cfg_local.sto_samp) + (size_t)cfg.N_symbol();
-            tx_sig.insert(tx_sig.end(), tail_guard, Complex(0.0, 0.0));
+        VecComplex rx_sig;
+        if (mode == RunMode::LOOPBACK) {
+            rx_sig = tx_sig;
         }
+        else if (mode == RunMode::AWGN) {
+            ChannelConfig cfg_local = ch_cfg;
+            cfg_local.snr_dB = awgn_snr_db;
 
-        VecComplex rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
+            if (cfg_local.enable_sto && cfg_local.sto_samp > 0) {
+                const size_t tail_guard =
+                    static_cast<size_t>(cfg_local.sto_samp) + (size_t)cfg.N_symbol();
+                tx_sig.insert(tx_sig.end(), tail_guard, Complex(0.0, 0.0));
+            }
+
+            rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
+        }
+        else if (mode == RunMode::USRP) {
+            rx_sig = transceive_usrp_burst(
+                usrp_device_args,
+                cfg.sampleRate(),
+                center_freq_hz,
+                tx_sig);
+        }
+        else {
+            throw std::runtime_error("Unknown OFDM run mode.");
+        }
 
         // ===== 锟斤拷锟斤拷同锟斤拷 =====
         int pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
@@ -1507,6 +1554,8 @@ TestResult run_ofdm_random_bit_test(
     );
 
     log << "========== OFDM RANDOM BIT TEST ==========\n";
+    log << "[MODE] " << mode_to_string(mode) << "\n";
+    log << "[CENTER FREQ] " << center_freq_hz << "\n";
     log << "[CHANNEL] STO=" << (ch_cfg.enable_sto ? "ON" : "OFF")
         << " CFO=" << (ch_cfg.enable_cfo ? "ON" : "OFF")
         << " SFO=" << (ch_cfg.enable_sfo ? "ON" : "OFF")
@@ -1528,6 +1577,156 @@ TestResult run_ofdm_random_bit_test(
     log << "[OFDM anti-SFO] pilot affine phase correction\n";
     log << "[Total compared bits] " << total_compared_bits << "\n";
     log << "[Total bit errors] " << total_bit_errors << "\n";
+    log << "BER = " << tr.total_ber << "\n";
+
+    tr.log_text = log.str();
+    return tr;
+}
+
+TestResult run_ofdm_file_transfer_test(
+    RunMode mode,
+    double awgn_snr_db,
+    double center_freq_hz,
+    const std::string& input_file_path,
+    const std::string& output_file_path,
+    const std::string& usrp_device_args,
+    const ChannelConfig& ch_cfg)
+{
+    std::ostringstream log;
+
+    if (input_file_path.empty()) {
+        throw std::runtime_error("OFDM input_file_path is empty");
+    }
+    if (output_file_path.empty()) {
+        throw std::runtime_error("OFDM output_file_path is empty");
+    }
+
+    OFDMConfig cfg;
+    cfg.N_fft = 256;
+    cfg.N_cp = 32;
+    cfg.N_sc = 128;
+    cfg.Nd = 10;
+    cfg.N_frm = 1;
+    cfg.N_zeros = 256;
+    cfg.P_f_inter = 6;
+    cfg.M = 4;
+    cfg.L = 7;
+    cfg.tblen = 32;
+    cfg.delta_f = 15e3;
+
+    std::ifstream ifs(input_file_path, std::ios::binary);
+    if (!ifs) {
+        throw std::runtime_error("Cannot open OFDM input file: " + input_file_path);
+    }
+    std::vector<uint8_t> file_bytes{
+        std::istreambuf_iterator<char>(ifs),
+        std::istreambuf_iterator<char>() };
+    if (file_bytes.empty()) {
+        throw std::runtime_error("OFDM input file is empty: " + input_file_path);
+    }
+
+    std::string filename_only = input_file_path;
+    const size_t slash = filename_only.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        filename_only = filename_only.substr(slash + 1);
+    }
+
+    OFDMImageTransmitter tx(cfg);
+    OFDMImageReceiver rx(cfg);
+
+    std::vector<VecComplex> tx_frames = tx.buildFileFrames(filename_only, file_bytes);
+    VecComplex tx_sig = tx.buildFileSignal(filename_only, file_bytes);
+
+    VecComplex rx_sig;
+    if (mode == RunMode::LOOPBACK) {
+        rx_sig = tx_sig;
+    }
+    else if (mode == RunMode::AWGN) {
+        ChannelConfig cfg_local = ch_cfg;
+        cfg_local.snr_dB = awgn_snr_db;
+        if (cfg_local.enable_sto && cfg_local.sto_samp > 0) {
+            const size_t tail_guard =
+                static_cast<size_t>(cfg_local.sto_samp) + static_cast<size_t>(cfg.N_symbol());
+            tx_sig.insert(tx_sig.end(), tail_guard, Complex(0.0, 0.0));
+        }
+        rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
+    }
+    else if (mode == RunMode::USRP) {
+        rx_sig = transceive_usrp_burst(
+            usrp_device_args,
+            cfg.sampleRate(),
+            center_freq_hz,
+            tx_sig);
+    }
+    else {
+        throw std::runtime_error("Unknown OFDM file run mode.");
+    }
+
+    std::string rx_name;
+    std::vector<uint8_t> rx_file_bytes;
+    const bool ok = rx.receiveFileSignal(rx_sig, rx_name, rx_file_bytes);
+
+    TestResult tr;
+    tr.decoded_frames = tx_frames.size();
+    tr.total_compared_bits = std::min(file_bytes.size(), rx_file_bytes.size()) * 8;
+    tr.file_saved = false;
+
+    size_t byte_errors = 0;
+    const size_t n = std::min(file_bytes.size(), rx_file_bytes.size());
+    for (size_t i = 0; i < n; ++i) {
+        if (file_bytes[i] != rx_file_bytes[i]) {
+            byte_errors++;
+        }
+    }
+    tr.total_bit_errors = byte_errors * 8;
+    tr.total_ber = tr.total_compared_bits
+        ? static_cast<double>(tr.total_bit_errors) / static_cast<double>(tr.total_compared_bits)
+        : 0.0;
+
+    if (ok) {
+        std::ofstream ofs(output_file_path, std::ios::binary);
+        if (!ofs) {
+            throw std::runtime_error("Cannot open OFDM output file: " + output_file_path);
+        }
+        if (!rx_file_bytes.empty()) {
+            ofs.write(
+                reinterpret_cast<const char*>(rx_file_bytes.data()),
+                static_cast<std::streamsize>(rx_file_bytes.size()));
+        }
+        tr.file_saved = true;
+        tr.saved_file_path = output_file_path;
+    }
+
+    const VecComplex tx_sig_wave_mid = extract_center_segment(tx_sig, 4000);
+    const VecComplex tx_sig_spec_mid = extract_center_segment(tx_sig, 1024);
+    const VecComplex tx_sig_tf_mid = extract_center_segment(tx_sig, 4096);
+    build_waveform_from_signal(tx_sig_wave_mid, ModulationType::QPSK, tr.waveform, tr.waveform_type);
+    build_spectrum_from_signal(tx_sig_spec_mid, cfg.sampleRate(), tr.spectrum_freq, tr.spectrum_mag);
+    build_spectrogram(tx_sig_tf_mid, cfg.sampleRate(), tr);
+
+    const VecComplex rx_sig_wave_mid = extract_center_segment(rx_sig, 4000);
+    const VecComplex rx_sig_spec_mid = extract_center_segment(rx_sig, 1024);
+    build_waveform_from_signal(rx_sig_wave_mid, ModulationType::QPSK, tr.rx_waveform, tr.rx_waveform_type);
+    build_spectrum_from_signal(rx_sig_spec_mid, cfg.sampleRate(), tr.rx_spectrum_freq, tr.rx_spectrum_mag);
+
+    log << "========== OFDM FILE TRANSFER TEST ==========\n";
+    log << "[MODE] " << mode_to_string(mode) << "\n";
+    log << "[CENTER FREQ] " << center_freq_hz << "\n";
+    log << "[INPUT FILE] " << input_file_path << "\n";
+    log << "[OUTPUT FILE] " << output_file_path << "\n";
+    log << "[FILE BYTES] " << file_bytes.size() << "\n";
+    log << "[TX FRAMES] " << tx_frames.size() << "\n";
+    log << "[CHANNEL] STO=" << (ch_cfg.enable_sto ? "ON" : "OFF")
+        << " CFO=" << (ch_cfg.enable_cfo ? "ON" : "OFF")
+        << " SFO=" << (ch_cfg.enable_sfo ? "ON" : "OFF")
+        << " AWGN=" << (ch_cfg.enable_awgn ? "ON" : "OFF") << "\n";
+    log << "[STO samp] " << ch_cfg.sto_samp << "\n";
+    log << "[CFO Hz] " << ch_cfg.cfo_hz << "\n";
+    log << "[SFO ppm] " << ch_cfg.sfo_ppm << "\n";
+    log << "[RX OK] " << (ok ? 1 : 0) << "\n";
+    log << "[RX NAME] " << rx_name << "\n";
+    log << "[RX BYTES] " << rx_file_bytes.size() << "\n";
+    log << "[BYTE ERRORS] " << byte_errors << "\n";
     log << "BER = " << tr.total_ber << "\n";
 
     tr.log_text = log.str();
