@@ -50,17 +50,17 @@ int main()
         // =========================
         // Unified test entry config
         // =========================
-        constexpr TestChain kChain = TestChain::SingleCarrierRandomBits;
+        constexpr TestChain kChain = TestChain::OfdmRandomBits;
         constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
         constexpr bool kPrintLogText = true;
 
         constexpr double kAwgnSnrDb = 20.0;
-        constexpr double kCenterFreqHz = 2.45e9;
+        constexpr double kCenterFreqHz = 433e6;
         const std::string kUsrpDeviceArgs = "type=b200";
 
         // Single-carrier parameters
-        constexpr ModulationType kSingleCarrierModulation = ModulationType::BPSK;
-        constexpr int kTxRepeatFrames = 100;
+        constexpr ModulationType kSingleCarrierModulation = ModulationType::QPSK;
+        constexpr int kTxRepeatFrames = 20;
         constexpr double kInfoRateBps = 64000.0;
         constexpr int kHopPattern = 0;
 
@@ -74,11 +74,11 @@ int main()
         ofdmChannelCfg.snr_dB = kAwgnSnrDb;
         ofdmChannelCfg.seed = 123;
         ofdmChannelCfg.enable_sto = false;
-        ofdmChannelCfg.sto_samp = 0;
+        ofdmChannelCfg.sto_samp = 10000;
         ofdmChannelCfg.enable_cfo = false;
-        ofdmChannelCfg.cfo_hz = 0.0;
+        ofdmChannelCfg.cfo_hz = 6000.0;
         ofdmChannelCfg.enable_sfo = false;
-        ofdmChannelCfg.sfo_ppm = 0.0;
+        ofdmChannelCfg.sfo_ppm = 10.0;
 
         TestResult tr;
 

@@ -101,6 +101,80 @@ static int detect_ofdm_pss_refined(
     return refine_pos;
 }
 
+static int detect_ofdm_pss_in_window(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    int center,
+    int radius,
+    double* out_metric = nullptr)
+{
+    if (out_metric) *out_metric = -1.0;
+    if (rx.size() < pss.size()) return -1;
+
+    const int max_start = static_cast<int>(rx.size() - pss.size());
+    const int start = std::max(0, center - radius);
+    const int end = std::min(max_start, center + radius);
+    if (start > end) return -1;
+
+    double best_metric = -1.0;
+    int best_pos = -1;
+    for (int d = start; d <= end; ++d) {
+        Complex acc(0.0, 0.0);
+        double er = 0.0;
+        double ep = 0.0;
+        for (size_t k = 0; k < pss.size(); ++k) {
+            acc += std::conj(pss[k]) * rx[static_cast<size_t>(d) + k];
+            er += std::norm(rx[static_cast<size_t>(d) + k]);
+            ep += std::norm(pss[k]);
+        }
+        if (er <= 1e-12 || ep <= 1e-12) continue;
+        const double metric = std::norm(acc) / (er * ep);
+        if (metric > best_metric) {
+            best_metric = metric;
+            best_pos = d;
+        }
+    }
+
+    if (out_metric) *out_metric = best_metric;
+    return best_pos;
+}
+
+static int find_first_valid_ofdm_pss_in_window(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    int start_center,
+    int radius,
+    double threshold,
+    double* out_metric = nullptr)
+{
+    if (out_metric) *out_metric = -1.0;
+    if (rx.size() < pss.size()) return -1;
+
+    const int max_start = static_cast<int>(rx.size() - pss.size());
+    const int start = std::max(0, start_center - radius);
+    const int end = std::min(max_start, start_center + radius);
+    if (start > end) return -1;
+
+    for (int d = start; d <= end; ++d) {
+        Complex acc(0.0, 0.0);
+        double er = 0.0;
+        double ep = 0.0;
+        for (size_t k = 0; k < pss.size(); ++k) {
+            acc += std::conj(pss[k]) * rx[static_cast<size_t>(d) + k];
+            er += std::norm(rx[static_cast<size_t>(d) + k]);
+            ep += std::norm(pss[k]);
+        }
+        if (er <= 1e-12 || ep <= 1e-12) continue;
+        const double metric = std::norm(acc) / (er * ep);
+        if (metric >= threshold) {
+            if (out_metric) *out_metric = metric;
+            return d;
+        }
+    }
+
+    return -1;
+}
+
 static double estimate_ofdm_cfo_from_cp(
     const VecComplex& rx,
     int pss_pos,
@@ -306,6 +380,202 @@ static double resolve_ofdm_cfo_ambiguity(
     return best_cfo;
 }
 
+static std::vector<std::vector<Complex>> make_ofdm_pilot_sequence(const OFDMConfig& cfg)
+{
+    auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
+    const int pilotNum = static_cast<int>(pilotPos.size());
+    std::vector<std::vector<Complex>> pilotSeq(
+        pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
+
+    uint32_t s = 1u;
+    auto rbit = [&]() {
+        s = 1664525u * s + 1013904223u;
+        return (s >> 31) & 1u;
+    };
+
+    for (int r = 0; r < pilotNum; ++r) {
+        for (int c = 0; c < cfg.Nd; ++c) {
+            pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
+        }
+    }
+    return pilotSeq;
+}
+
+static VecComplex build_ofdm_random_frame_signal(
+    const OFDMConfig& cfg,
+    const VecInt& tx_bits,
+    const std::vector<int>& pilotPos,
+    const std::vector<int>& dataPos,
+    const std::vector<std::vector<Complex>>& pilotSeq,
+    VecComplex* out_qam_syms = nullptr)
+{
+    VecInt codedBits = OFDMUtils::convEncode_171_133(tx_bits);
+    VecComplex qamSyms = OFDMUtils::qamMod(codedBits, cfg.M);
+    if (out_qam_syms) {
+        *out_qam_syms = qamSyms;
+    }
+
+    std::vector<std::vector<Complex>> grid(
+        cfg.N_sc, std::vector<Complex>(cfg.Nd, Complex(0.0, 0.0)));
+
+    for (size_t r = 0; r < pilotPos.size(); ++r) {
+        for (int c = 0; c < cfg.Nd; ++c) {
+            grid[pilotPos[r]][c] = pilotSeq[r][c];
+        }
+    }
+
+    size_t idx = 0;
+    for (int c = 0; c < cfg.Nd; ++c) {
+        for (size_t r = 0; r < dataPos.size(); ++r) {
+            grid[dataPos[r]][c] = (idx < qamSyms.size()) ? qamSyms[idx++] : Complex(0.0, 0.0);
+        }
+    }
+
+    VecComplex tx_data;
+    for (int col = 0; col < cfg.Nd; ++col) {
+        VecComplex X(cfg.N_fft, Complex(0.0, 0.0));
+        for (int k = 0; k < cfg.N_sc; ++k) {
+            X[1 + k] = grid[k][col];
+        }
+        VecComplex x = OFDMUtils::ifft(X);
+        for (int i = cfg.N_fft - cfg.N_cp; i < cfg.N_fft; ++i) {
+            tx_data.push_back(x[i]);
+        }
+        tx_data.insert(tx_data.end(), x.begin(), x.end());
+    }
+
+    VecComplex tx_sig;
+    tx_sig.insert(tx_sig.end(), cfg.N_zeros, Complex(0.0, 0.0));
+    VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
+    tx_sig.insert(tx_sig.end(), pss.begin(), pss.end());
+    tx_sig.insert(tx_sig.end(), tx_data.begin(), tx_data.end());
+    return tx_sig;
+}
+
+static bool decode_ofdm_random_frame_signal(
+    const VecComplex& rx_sig,
+    const OFDMConfig& cfg,
+    const std::vector<int>& pilotPos,
+    const std::vector<int>& dataPos,
+    const std::vector<std::vector<Complex>>& pilotSeq,
+    int initial_pss_pos,
+    int pss_refine_radius,
+    bool use_cfo_ambiguity_resolve,
+    VecInt& rx_bits,
+    VecComplex* out_eqSyms = nullptr,
+    double* out_cfo_hat_hz = nullptr,
+    int* out_pss_pos = nullptr)
+{
+    rx_bits.clear();
+    if (out_eqSyms) out_eqSyms->clear();
+    if (out_cfo_hat_hz) *out_cfo_hat_hz = 0.0;
+    if (out_pss_pos) *out_pss_pos = -1;
+
+    const VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
+    int pssPos = initial_pss_pos;
+    if (pssPos < 0 || pssPos + static_cast<int>(pss.size()) > static_cast<int>(rx_sig.size())) {
+        return false;
+    }
+
+    const double cfo_alias_hz = estimate_ofdm_cfo_from_cp(rx_sig, pssPos, cfg);
+    const double cfo_hat_hz = use_cfo_ambiguity_resolve
+        ? resolve_ofdm_cfo_ambiguity(rx_sig, pss, cfg, cfo_alias_hz)
+        : cfo_alias_hz;
+
+    VecComplex rx_work = rx_sig;
+    if (std::isfinite(cfo_hat_hz) && std::abs(cfo_hat_hz) > 1e-9) {
+        rx_work = apply_frequency_correction(rx_sig, cfg.sampleRate(), cfo_hat_hz);
+        pssPos = detect_ofdm_pss_in_window(rx_work, pss, pssPos, pss_refine_radius, nullptr);
+        if (pssPos < 0) {
+            return false;
+        }
+    }
+
+    std::vector<VecComplex> symbolsNoCP;
+    if (!extract_ofdm_symbols_from_pss(rx_work, pssPos, pss, cfg, symbolsNoCP)) {
+        return false;
+    }
+
+    VecComplex eqSyms;
+    const int pilotNum = static_cast<int>(pilotPos.size());
+    for (int col = 0; col < cfg.Nd; ++col) {
+        VecComplex Y = OFDMUtils::fft(symbolsNoCP[col]);
+        VecComplex used(cfg.N_sc);
+        for (int k = 0; k < cfg.N_sc; ++k) {
+            used[k] = Y[1 + k];
+        }
+
+        VecComplex rxPilot(pilotNum), txPilot(pilotNum);
+        for (int i = 0; i < pilotNum; ++i) {
+            rxPilot[i] = used[pilotPos[i]];
+            txPilot[i] = pilotSeq[i][col];
+        }
+
+        std::vector<double> pilot_phase(pilotNum, 0.0);
+        for (int i = 0; i < pilotNum; ++i) {
+            Complex h = (std::abs(txPilot[i]) > 1e-12)
+                ? (rxPilot[i] / txPilot[i])
+                : Complex(1.0, 0.0);
+            pilot_phase[i] = std::atan2(h.imag(), h.real());
+            if (i > 0) {
+                pilot_phase[i] = pilot_phase[i - 1] +
+                    wrap_phase_pm_pi(pilot_phase[i] - pilot_phase[i - 1]);
+            }
+        }
+
+        double phase_slope = 0.0;
+        double phase_bias = 0.0;
+        fit_phase_line(pilotPos, pilot_phase, phase_slope, phase_bias);
+
+        VecComplex used_phase_corrected = used;
+        for (int k = 0; k < cfg.N_sc; ++k) {
+            const double ph = phase_slope * static_cast<double>(k) + phase_bias;
+            used_phase_corrected[k] *= std::conj(Complex(std::cos(ph), std::sin(ph)));
+        }
+
+        VecComplex rxPilotCorrected(pilotNum);
+        for (int i = 0; i < pilotNum; ++i) {
+            rxPilotCorrected[i] = used_phase_corrected[pilotPos[i]];
+        }
+
+        auto H = OFDMUtils::linearInterpChannel(pilotPos, rxPilotCorrected, txPilot, dataPos);
+        for (size_t i = 0; i < dataPos.size(); ++i) {
+            Complex h = H[i];
+            if (std::abs(h) < 1e-12) h = Complex(1.0, 0.0);
+            eqSyms.push_back(used_phase_corrected[dataPos[i]] / h);
+        }
+    }
+
+    VecInt rx_coded_bits = OFDMUtils::qamDemod(eqSyms, cfg.M);
+    rx_bits = OFDMUtils::viterbiDecodeHard_171_133(rx_coded_bits, cfg.tblen);
+
+    if (out_eqSyms) *out_eqSyms = eqSyms;
+    if (out_cfo_hat_hz) *out_cfo_hat_hz = cfo_hat_hz;
+    if (out_pss_pos) *out_pss_pos = pssPos;
+    return !rx_bits.empty();
+}
+
+static bool decode_ofdm_random_frame_signal(
+    const VecComplex& rx_sig,
+    const OFDMConfig& cfg,
+    const std::vector<int>& pilotPos,
+    const std::vector<int>& dataPos,
+    const std::vector<std::vector<Complex>>& pilotSeq,
+    VecInt& rx_bits,
+    VecComplex* out_eqSyms = nullptr,
+    double* out_cfo_hat_hz = nullptr,
+    int* out_pss_pos = nullptr)
+{
+    const VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
+    int pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
+    if (pssPos < 0) {
+        return false;
+    }
+    return decode_ofdm_random_frame_signal(
+        rx_sig, cfg, pilotPos, dataPos, pilotSeq, pssPos, 12, true,
+        rx_bits, out_eqSyms, out_cfo_hat_hz, out_pss_pos);
+}
+
 static std::vector<unsigned char> bits_to_bytes(const VecInt& bits)
 {
     std::vector<unsigned char> bytes;
@@ -354,7 +624,8 @@ static VecComplex transceive_usrp_burst(
     const std::string& device_args,
     double sample_rate,
     double center_freq_hz,
-    const VecComplex& tx_burst)
+    const VecComplex& tx_burst,
+    size_t rx_extra_samps = 0)
 {
 #ifdef WITH_UHD
     USRPDriver::Config uc;
@@ -364,7 +635,7 @@ static VecComplex transceive_usrp_burst(
 
     USRPDriver usrp(uc);
     usrp.init();
-    usrp.start_rx_worker(tx_burst.size());
+    usrp.start_rx_worker(tx_burst.size() + rx_extra_samps);
     usrp.send_burst(tx_burst);
     usrp.wait_rx_worker();
     return usrp.fetch_rx_buffer();
@@ -373,6 +644,7 @@ static VecComplex transceive_usrp_burst(
     (void)sample_rate;
     (void)center_freq_hz;
     (void)tx_burst;
+    (void)rx_extra_samps;
     throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
 #endif
 }
@@ -1265,7 +1537,8 @@ TestResult run_ofdm_random_bit_test(
     cfg.tblen = 32;
     cfg.delta_f = 15e3;
 
-    constexpr int kNumFrames = 200;
+    constexpr int kNumFrames = 10;
+    constexpr bool kEnableOfdmUsrpBurstMode = false;
 
     TestResult tr;
 
@@ -1277,6 +1550,9 @@ TestResult run_ofdm_random_bit_test(
 
     std::mt19937 rng(1);
     std::uniform_int_distribution<int> dist01(0, 1);
+    auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
+    auto dataPos2 = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
+    std::vector<std::vector<Complex>> pilotSeqRef = make_ofdm_pilot_sequence(cfg);
 
     size_t total_bit_errors = 0;
     size_t total_compared_bits = 0;
@@ -1286,78 +1562,192 @@ TestResult run_ofdm_random_bit_test(
     VecComplex last_tx_sig;
     VecComplex last_rx_sig;
 
+    if (mode == RunMode::USRP && kEnableOfdmUsrpBurstMode)
+    {
+        const VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
+        const size_t ofdm_frame_span =
+            static_cast<size_t>(cfg.N_zeros) +
+            pss.size() +
+            static_cast<size_t>(cfg.Nd) * static_cast<size_t>(cfg.N_symbol());
+
+        std::vector<VecInt> tx_bits_frames;
+        std::vector<VecComplex> tx_sig_frames;
+        tx_bits_frames.reserve(kNumFrames);
+        tx_sig_frames.reserve(kNumFrames);
+
+        for (int frm = 0; frm < kNumFrames; ++frm)
+        {
+            VecInt tx_bits;
+            tx_bits.reserve(uncodedBitsPerFrame);
+            for (int i = 0; i < uncodedBitsPerFrame; ++i) {
+                tx_bits.push_back(dist01(rng));
+            }
+            VecComplex tx_sig = build_ofdm_random_frame_signal(
+                cfg, tx_bits, pilotPos, dataPos2, pilotSeqRef);
+
+            tx_bits_frames.push_back(std::move(tx_bits));
+            tx_sig_frames.push_back(std::move(tx_sig));
+        }
+
+        const size_t burst_guard_samps = 2 * ofdm_frame_span;
+        VecComplex tx_burst;
+        tx_burst.reserve(
+            burst_guard_samps +
+            static_cast<size_t>(kNumFrames) * ofdm_frame_span +
+            burst_guard_samps);
+        tx_burst.insert(tx_burst.end(), burst_guard_samps, Complex(0.0, 0.0));
+        for (const auto& frame_sig : tx_sig_frames) {
+            tx_burst.insert(tx_burst.end(), frame_sig.begin(), frame_sig.end());
+        }
+        tx_burst.insert(tx_burst.end(), burst_guard_samps, Complex(0.0, 0.0));
+
+        VecComplex rx_burst = transceive_usrp_burst(
+            usrp_device_args,
+            cfg.sampleRate(),
+            center_freq_hz,
+            tx_burst,
+            2 * ofdm_frame_span);
+
+        double first_metric = -1.0;
+        int first_pss = find_first_valid_ofdm_pss_in_window(
+            rx_burst,
+            pss,
+            static_cast<int>(burst_guard_samps + cfg.N_zeros),
+            static_cast<int>(2 * ofdm_frame_span),
+            0.70,
+            &first_metric);
+        if (first_pss < 0) {
+            first_pss = detect_ofdm_pss_refined(rx_burst, pss, 12);
+        }
+        if (first_pss < 0) {
+            throw std::runtime_error("OFDM PSS detect failed in USRP burst.");
+        }
+
+        log << "[USRP OFDM] one-shot burst mode\n";
+        log << "[USRP OFDM] tx_burst_samples=" << tx_burst.size() << "\n";
+        log << "[USRP OFDM] rx_burst_samples=" << rx_burst.size() << "\n";
+        log << "[USRP OFDM] first_pss=" << first_pss << "\n";
+        log << "[USRP OFDM] first_metric=" << first_metric << "\n";
+
+        for (int frm = 0; frm < kNumFrames; ++frm)
+        {
+            const int expected_pss = first_pss + frm * static_cast<int>(ofdm_frame_span);
+            const int search_radius = std::max(64, cfg.N_cp * 4);
+            const int pssPos = detect_ofdm_pss_in_window(
+                rx_burst, pss, expected_pss, search_radius, nullptr);
+
+            if (pssPos < 0) {
+                throw std::runtime_error("OFDM local PSS detect failed in USRP burst.");
+            }
+
+            // Give the shared single-frame decoder some slack around the nominal frame
+            // so refined PSS/CFO steps do not fail due to a too-tight crop.
+            const int frame_pad = std::max(64, cfg.N_cp * 4);
+            const int frame_base_nominal = pssPos - cfg.N_zeros;
+            const int frame_base = std::max(0, frame_base_nominal - frame_pad);
+            const int frame_end = std::min(
+                static_cast<int>(rx_burst.size()),
+                frame_base_nominal + static_cast<int>(ofdm_frame_span) + frame_pad);
+            if (frame_base >= frame_end) {
+                throw std::runtime_error("OFDM frame window out of range in USRP burst.");
+            }
+            VecComplex rx_frame(
+                rx_burst.begin() + static_cast<std::ptrdiff_t>(frame_base),
+                rx_burst.begin() + static_cast<std::ptrdiff_t>(frame_end));
+
+            VecComplex eqSyms;
+            VecInt rx_bits;
+            double cfo_hat_hz = 0.0;
+            int refined_pss = -1;
+            const int local_pss = pssPos - frame_base;
+            if (!decode_ofdm_random_frame_signal(
+                rx_frame, cfg, pilotPos, dataPos2, pilotSeqRef, local_pss, search_radius, false,
+                rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
+                log << "[USRP OFDM] frame_decode_failed"
+                    << " frm=" << frm
+                    << " expected_pss=" << expected_pss
+                    << " pss=" << pssPos
+                    << " local_pss=" << local_pss
+                    << " frame_base_nominal=" << frame_base_nominal
+                    << " frame_base=" << frame_base
+                    << " frame_end=" << frame_end
+                    << " frame_len=" << (frame_end - frame_base)
+                    << "\n";
+                throw std::runtime_error("OFDM frame decode failed in USRP burst.");
+            }
+            if (rx_bits.size() > tx_bits_frames[frm].size()) {
+                rx_bits.resize(tx_bits_frames[frm].size());
+            }
+
+            size_t bit_errors = 0;
+            double ber = compute_ber(tx_bits_frames[frm], rx_bits, bit_errors);
+            total_bit_errors += bit_errors;
+            total_compared_bits += std::min(tx_bits_frames[frm].size(), rx_bits.size());
+
+            if (frm == kNumFrames - 1) {
+                last_eqSyms = eqSyms;
+                last_tx_sig = tx_sig_frames[frm];
+                last_rx_sig = rx_frame;
+            }
+
+            log << "[Frame " << (frm + 1) << "/" << kNumFrames << "] "
+                << "bits=" << std::min(tx_bits_frames[frm].size(), rx_bits.size())
+                << ", errors=" << bit_errors
+                << ", ber=" << ber
+                << ", pss=" << pssPos
+                << ", refined_pss=" << refined_pss
+                << ", cfo=" << cfo_hat_hz
+                << "\n";
+        }
+
+        tr.total_bit_errors = total_bit_errors;
+        tr.total_compared_bits = total_compared_bits;
+        tr.total_ber = (total_compared_bits > 0)
+            ? static_cast<double>(total_bit_errors) / static_cast<double>(total_compared_bits)
+            : 0.0;
+        tr.decoded_frames = kNumFrames;
+
+        build_constellation_result(last_eqSyms, tr);
+
+        const VecComplex tx_sig_wave_mid = extract_center_segment(last_tx_sig, 4000);
+        const VecComplex tx_sig_spec_mid = extract_center_segment(last_tx_sig, 1024);
+        const VecComplex tx_sig_tf_mid = extract_center_segment(last_tx_sig, 4096);
+        build_waveform_from_signal(tx_sig_wave_mid, ModulationType::QPSK, tr.waveform, tr.waveform_type);
+        build_spectrum_from_signal(tx_sig_spec_mid, cfg.sampleRate(), tr.spectrum_freq, tr.spectrum_mag);
+        build_spectrogram(tx_sig_tf_mid, cfg.sampleRate(), tr);
+
+        const VecComplex rx_sig_wave_mid = extract_center_segment(last_rx_sig, 4000);
+        const VecComplex rx_sig_spec_mid = extract_center_segment(last_rx_sig, 1024);
+        build_waveform_from_signal(rx_sig_wave_mid, ModulationType::QPSK, tr.rx_waveform, tr.rx_waveform_type);
+        build_spectrum_from_signal(rx_sig_spec_mid, cfg.sampleRate(), tr.rx_spectrum_freq, tr.rx_spectrum_mag);
+
+        log << "========== OFDM RANDOM BIT TEST ==========\n";
+        log << "[MODE] " << mode_to_string(mode) << "\n";
+        log << "[CENTER FREQ] " << center_freq_hz << "\n";
+        log << "[Frames] " << kNumFrames << "\n";
+        log << "[fs] " << cfg.sampleRate() << "\n";
+        log << "[Total compared bits] " << total_compared_bits << "\n";
+        log << "[Total bit errors] " << total_bit_errors << "\n";
+        log << "BER = " << tr.total_ber << "\n";
+        tr.log_text = log.str();
+        return tr;
+    }
+
     for (int frm = 0; frm < kNumFrames; ++frm)
     {
-        // ===== 锟斤拷锟斤拷锟斤拷锟?bit =====
         VecInt tx_bits;
         tx_bits.reserve(uncodedBitsPerFrame);
         for (int i = 0; i < uncodedBitsPerFrame; ++i) {
             tx_bits.push_back(dist01(rng));
         }
-
-        // ===== 锟斤拷锟剿ｏ拷锟斤拷锟斤拷 + QAM =====
-        VecInt codedBits = OFDMUtils::convEncode_171_133(tx_bits);
-        VecComplex qamSyms = OFDMUtils::qamMod(codedBits, cfg.M);
-
-        // ===== 锟斤拷源映锟斤拷 =====
-        auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
-        auto dataPos2 = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
-
-        const int pilotNum = static_cast<int>(pilotPos.size());
-        std::vector<std::vector<Complex>> grid(cfg.N_sc, std::vector<Complex>(cfg.Nd, Complex(0.0, 0.0)));
-
-        // 锟诫发锟斤拷一锟铰碉拷 pilot 锟斤拷锟斤拷
-        std::vector<std::vector<Complex>> pilotSeq(pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
-        {
-            uint32_t s = 1u;
-            auto rbit = [&]() {
-                s = 1664525u * s + 1013904223u;
-                return (s >> 31) & 1u;
-                };
-
-            for (int r = 0; r < pilotNum; ++r) {
-                for (int c = 0; c < cfg.Nd; ++c) {
-                    pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
-                    grid[pilotPos[r]][c] = pilotSeq[r][c];
-                }
-            }
-        }
-
-        {
-            size_t idx = 0;
-            for (int c = 0; c < cfg.Nd; ++c) {
-                for (size_t r = 0; r < dataPos2.size(); ++r) {
-                    grid[dataPos2[r]][c] = (idx < qamSyms.size()) ? qamSyms[idx++] : Complex(0.0, 0.0);
-                }
-            }
-        }
-
-        // ===== OFDM 锟斤拷锟斤拷 =====
-        VecComplex tx_data;
-        for (int col = 0; col < cfg.Nd; ++col)
-        {
-            VecComplex X(cfg.N_fft, Complex(0.0, 0.0));
-
-            // bin0=DC, 1..N_sc 锟斤拷锟斤拷锟斤拷
-            for (int k = 0; k < cfg.N_sc; ++k) {
-                X[1 + k] = grid[k][col];
-            }
-
-            VecComplex x = OFDMUtils::ifft(X);
-
-            // CP
-            for (int i = cfg.N_fft - cfg.N_cp; i < cfg.N_fft; ++i) {
-                tx_data.push_back(x[i]);
-            }
-            tx_data.insert(tx_data.end(), x.begin(), x.end());
-        }
-
-        // ===== 锟斤拷前锟斤拷锟斤拷 + PSS =====
-        VecComplex tx_sig;
-        tx_sig.insert(tx_sig.end(), cfg.N_zeros, Complex(0.0, 0.0));
+        VecComplex tx_sig = build_ofdm_random_frame_signal(
+            cfg, tx_bits, pilotPos, dataPos2, pilotSeqRef);
         VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
-        tx_sig.insert(tx_sig.end(), pss.begin(), pss.end());
-        tx_sig.insert(tx_sig.end(), tx_data.begin(), tx_data.end());
+
+        const size_t ofdm_frame_span =
+            static_cast<size_t>(cfg.N_zeros) +
+            pss.size() +
+            static_cast<size_t>(cfg.Nd) * static_cast<size_t>(cfg.N_symbol());
 
         VecComplex rx_sig;
         if (mode == RunMode::LOOPBACK) {
@@ -1376,112 +1766,48 @@ TestResult run_ofdm_random_bit_test(
             rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
         }
         else if (mode == RunMode::USRP) {
+            VecComplex tx_usrp;
+            const size_t guard_samps = 2 * ofdm_frame_span;
+            tx_usrp.reserve(tx_sig.size() + 2 * guard_samps);
+            tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+            tx_usrp.insert(tx_usrp.end(), tx_sig.begin(), tx_sig.end());
+            tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+
             rx_sig = transceive_usrp_burst(
                 usrp_device_args,
                 cfg.sampleRate(),
                 center_freq_hz,
-                tx_sig);
+                tx_usrp,
+                2 * ofdm_frame_span);
         }
         else {
             throw std::runtime_error("Unknown OFDM run mode.");
         }
 
-        // ===== 锟斤拷锟斤拷同锟斤拷 =====
-        int pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
-
-        if (pssPos < 0) {
-            throw std::runtime_error("OFDM PSS detect failed.");
-        }
-
-        const double cfo_alias_hz = estimate_ofdm_cfo_from_cp(rx_sig, pssPos, cfg);
-        const double cfo_hat_hz = resolve_ofdm_cfo_ambiguity(rx_sig, pss, cfg, cfo_alias_hz);
-        if (std::isfinite(cfo_hat_hz) && std::abs(cfo_hat_hz) > 1e-9) {
-            rx_sig = apply_frequency_correction(rx_sig, cfg.sampleRate(), cfo_hat_hz);
-            pssPos = detect_ofdm_pss_refined(rx_sig, pss, 12);
-            if (pssPos < 0) {
-                throw std::runtime_error("OFDM PSS detect failed after CFO correction.");
-            }
-        }
-
-        // ===== 锟斤拷取 OFDM 锟斤拷锟斤拷 =====
-        std::vector<VecComplex> symbolsNoCP;
-        {
-            // 锟斤拷锟斤拷锟斤拷锟斤拷 SNR 锟斤拷锟斤拷锟届常锟斤拷锟诫，锟斤拷锟斤拷锟皆改筹拷 pssPos + pss.size()
-            int pos0 = pssPos + static_cast<int>(pss.size()) - 1;
-
-            for (int i = 0; i < cfg.Nd; ++i) {
-                int cpStart = pos0 + i * (cfg.N_cp + cfg.N_fft);
-                int dataStart = cpStart + cfg.N_cp;
-                int dataEnd = dataStart + cfg.N_fft;
-
-                if (dataStart < 0 || dataEnd > static_cast<int>(rx_sig.size())) {
-                    throw std::runtime_error("OFDM symbol extraction failed.");
-                }
-
-                symbolsNoCP.emplace_back(
-                    rx_sig.begin() + dataStart,
-                    rx_sig.begin() + dataEnd
-                );
-            }
-        }
-
-        // ===== FFT + 锟斤拷频锟斤拷锟斤拷 + 锟斤拷锟斤拷 =====
         VecComplex eqSyms;
-
-        for (int col = 0; col < cfg.Nd; ++col)
-        {
-            VecComplex Y = OFDMUtils::fft(symbolsNoCP[col]);
-
-            VecComplex used(cfg.N_sc);
-            for (int k = 0; k < cfg.N_sc; ++k) {
-                used[k] = Y[1 + k];
+        VecInt rx_bits;
+        double cfo_hat_hz = 0.0;
+        int refined_pss = -1;
+        if (mode == RunMode::USRP) {
+            const int expected_pss =
+                static_cast<int>(2 * ofdm_frame_span) + cfg.N_zeros;
+            const int search_radius = static_cast<int>(2 * ofdm_frame_span);
+            const int local_pss = detect_ofdm_pss_in_window(
+                rx_sig, pss, expected_pss, search_radius, nullptr);
+            if (local_pss < 0) {
+                throw std::runtime_error("OFDM local PSS detect failed.");
             }
-
-            VecComplex rxPilot(pilotNum), txPilot(pilotNum);
-            for (int i = 0; i < pilotNum; ++i) {
-                rxPilot[i] = used[pilotPos[i]];
-                txPilot[i] = pilotSeq[i][col];
-            }
-
-            std::vector<double> pilot_phase(pilotNum, 0.0);
-            for (int i = 0; i < pilotNum; ++i) {
-                Complex h = (std::abs(txPilot[i]) > 1e-12)
-                    ? (rxPilot[i] / txPilot[i])
-                    : Complex(1.0, 0.0);
-                pilot_phase[i] = std::atan2(h.imag(), h.real());
-                if (i > 0) {
-                    pilot_phase[i] = pilot_phase[i - 1] +
-                        wrap_phase_pm_pi(pilot_phase[i] - pilot_phase[i - 1]);
-                }
-            }
-
-            double phase_slope = 0.0;
-            double phase_bias = 0.0;
-            fit_phase_line(pilotPos, pilot_phase, phase_slope, phase_bias);
-
-            VecComplex used_phase_corrected = used;
-            for (int k = 0; k < cfg.N_sc; ++k) {
-                const double ph = phase_slope * static_cast<double>(k) + phase_bias;
-                used_phase_corrected[k] *= std::conj(Complex(std::cos(ph), std::sin(ph)));
-            }
-
-            VecComplex rxPilotCorrected(pilotNum);
-            for (int i = 0; i < pilotNum; ++i) {
-                rxPilotCorrected[i] = used_phase_corrected[pilotPos[i]];
-            }
-
-            auto H = OFDMUtils::linearInterpChannel(pilotPos, rxPilotCorrected, txPilot, dataPos2);
-
-            for (size_t i = 0; i < dataPos2.size(); ++i) {
-                Complex h = H[i];
-                if (std::abs(h) < 1e-12) h = Complex(1.0, 0.0);
-                eqSyms.push_back(used_phase_corrected[dataPos2[i]] / h);
+            if (!decode_ofdm_random_frame_signal(
+                rx_sig, cfg, pilotPos, dataPos2, pilotSeqRef, local_pss, 64, false,
+                rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
+                throw std::runtime_error("OFDM frame decode failed.");
             }
         }
-
-        // ===== 锟斤拷锟?+ 锟斤拷锟斤拷 =====
-        VecInt rx_coded_bits = OFDMUtils::qamDemod(eqSyms, cfg.M);
-        VecInt rx_bits = OFDMUtils::viterbiDecodeHard_171_133(rx_coded_bits, cfg.tblen);
+        else if (!decode_ofdm_random_frame_signal(
+            rx_sig, cfg, pilotPos, dataPos2, pilotSeqRef,
+            rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
+            throw std::runtime_error("OFDM frame decode failed.");
+        }
 
         if (rx_bits.size() > tx_bits.size()) {
             rx_bits.resize(tx_bits.size());
@@ -1503,7 +1829,10 @@ TestResult run_ofdm_random_bit_test(
         log << "[Frame " << (frm + 1) << "/" << kNumFrames << "] "
             << "bits=" << std::min(tx_bits.size(), rx_bits.size())
             << ", errors=" << bit_errors
-            << ", ber=" << ber << "\n";
+            << ", ber=" << ber
+            << ", refined_pss=" << refined_pss
+            << ", cfo=" << cfo_hat_hz
+            << "\n";
     }
 
     tr.total_bit_errors = total_bit_errors;
@@ -1636,6 +1965,11 @@ TestResult run_ofdm_file_transfer_test(
 
     std::vector<VecComplex> tx_frames = tx.buildFileFrames(filename_only, file_bytes);
     VecComplex tx_sig = tx.buildFileSignal(filename_only, file_bytes);
+    const size_t pss_len = OFDMUtils::makePSS(cfg.N_fft).size();
+    const size_t ofdm_frame_span =
+        static_cast<size_t>(cfg.N_zeros) +
+        pss_len +
+        static_cast<size_t>(cfg.Nd) * static_cast<size_t>(cfg.N_symbol());
 
     VecComplex rx_sig;
     if (mode == RunMode::LOOPBACK) {
@@ -1652,11 +1986,19 @@ TestResult run_ofdm_file_transfer_test(
         rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
     }
     else if (mode == RunMode::USRP) {
+        const size_t guard_samps = 2 * ofdm_frame_span;
+        VecComplex tx_usrp;
+        tx_usrp.reserve(tx_sig.size() + 2 * guard_samps);
+        tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+        tx_usrp.insert(tx_usrp.end(), tx_sig.begin(), tx_sig.end());
+        tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+
         rx_sig = transceive_usrp_burst(
             usrp_device_args,
             cfg.sampleRate(),
             center_freq_hz,
-            tx_sig);
+            tx_usrp,
+            2 * ofdm_frame_span);
     }
     else {
         throw std::runtime_error("Unknown OFDM file run mode.");
