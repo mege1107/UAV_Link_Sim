@@ -5,13 +5,13 @@
 
 // ===== 固定参数（两台电脑必须一致）=====
 static const std::string DEVICE_ARGS = "type=b200";
-static const double CENTER_FREQ = 2.45e9;
+static const double CENTER_FREQ = 433e6;
 static const double INFO_RATE = 50000.0;
 static const int HOP_PATTERN = 1;
 static const ModulationType MOD = ModulationType::QAM;
 
 // TX 参数
-static const int TX_REPEAT = 500;   // 多发几轮，防止对不上
+static const int TX_REPEAT = 5000;   // 多发几轮，防止对不上
 
 // RX 参数
 static const int RX_EXPECT_FRAMES = 300;
@@ -80,6 +80,9 @@ int main()
                 std::cout << "RX samples = " << rxr.rx_sample_count << std::endl;
                 std::cout << "Decoded bits = " << rxr.decoded_bits_count << std::endl;
                 std::cout << "Decoded frames = " << rxr.decoded_frames << std::endl;
+                std::cout << "Bit errors = " << rxr.total_bit_errors << std::endl;
+                std::cout << "Compared bits = " << rxr.total_compared_bits << std::endl;
+                std::cout << "BER = " << rxr.total_ber << std::endl;
                 std::cout << "fs = " << rxr.fs << std::endl;
             }
             else

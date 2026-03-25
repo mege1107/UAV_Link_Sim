@@ -287,6 +287,20 @@ namespace
         return bytes;
     }
 
+    static double compute_ber(const VecInt& tx, const VecInt& rx, size_t& bit_errors)
+    {
+        const size_t n = std::min(tx.size(), rx.size());
+        bit_errors = 0;
+
+        for (size_t i = 0; i < n; ++i) {
+            if ((tx[i] & 1) != (rx[i] & 1)) {
+                bit_errors++;
+            }
+        }
+
+        return n ? static_cast<double>(bit_errors) / static_cast<double>(n) : 0.0;
+    }
+
     static unsigned short read_u16_be(const std::vector<unsigned char>& data, size_t pos)
     {
         return static_cast<unsigned short>(
@@ -635,6 +649,7 @@ RxOnlyResult run_rx_role_once(
 
     Transmitter tx_ref(cfg);
     VecComplex ref_frame = tx_ref.generateTransmitSignal();
+    VecInt ref_bits = tx_ref.getLastSourceBits();
     cfg.fs = tx_ref.getFS();
 
     if (ref_frame.empty()) {
@@ -673,10 +688,33 @@ RxOnlyResult run_rx_role_once(
     const size_t decoded_frames =
         (bits_per_frame > 0) ? (rx_bits.size() / bits_per_frame) : 0;
 
+    size_t total_compared_bits = 0;
+    size_t total_bit_errors = 0;
+
+    for (size_t i = 0; i < decoded_frames; ++i)
+    {
+        VecInt rx_frame(
+            rx_bits.begin() + static_cast<long long>(i * bits_per_frame),
+            rx_bits.begin() + static_cast<long long>((i + 1) * bits_per_frame)
+        );
+
+        size_t frame_errors = 0;
+        compute_ber(ref_bits, rx_frame, frame_errors);
+
+        total_bit_errors += frame_errors;
+        total_compared_bits += std::min(ref_bits.size(), rx_frame.size());
+    }
+
     RxOnlyResult rr;
     rr.rx_sample_count = rx_sig.size();
     rr.decoded_bits_count = rx_bits.size();
     rr.decoded_frames = decoded_frames;
+    rr.total_bit_errors = total_bit_errors;
+    rr.total_compared_bits = total_compared_bits;
+    rr.total_ber =
+        total_compared_bits ?
+        static_cast<double>(total_bit_errors) / static_cast<double>(total_compared_bits) :
+        0.0;
     rr.fs = cfg.fs;
 
     {
@@ -703,6 +741,9 @@ RxOnlyResult run_rx_role_once(
     log << "[CONSTELLATION POINTS] " << rr.constellation_i.size() << "\n";
     log << "[DECODED BITS] " << rr.decoded_bits_count << "\n";
     log << "[DECODED FRAMES] " << rr.decoded_frames << "\n";
+    log << "[BIT ERRORS] " << rr.total_bit_errors << "\n";
+    log << "[COMPARED BITS] " << rr.total_compared_bits << "\n";
+    log << "BER = " << rr.total_ber << "\n";
 
     rr.log_text = log.str();
     return rr;
