@@ -10,6 +10,8 @@
 #include <sstream>
 #include <cmath>
 #include <iterator>
+#include <chrono>
+#include <thread>
 
 #include "transmitter.h"
 #include "receiver.h"
@@ -22,6 +24,10 @@
 
 static constexpr bool SHOW_PURE_MSK_ONLY = true;
 static constexpr bool kEnableDebugLogs = true;
+static constexpr size_t kSingleCarrierUsrpPreGuardSamps = 200000;
+static constexpr size_t kSingleCarrierUsrpPostGuardSamps = 5000;
+static constexpr int kSingleCarrierUsrpRxExtraFrames = 10;
+static constexpr auto kSingleCarrierUsrpRxWarmup = std::chrono::milliseconds(50);
 
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
@@ -649,6 +655,19 @@ static VecComplex transceive_usrp_burst(
 #endif
 }
 
+static VecComplex build_guarded_usrp_burst(
+    const VecComplex& payload,
+    size_t pre_guard_samps,
+    size_t post_guard_samps)
+{
+    VecComplex burst;
+    burst.reserve(pre_guard_samps + payload.size() + post_guard_samps);
+    burst.insert(burst.end(), pre_guard_samps, Complex(0.0, 0.0));
+    burst.insert(burst.end(), payload.begin(), payload.end());
+    burst.insert(burst.end(), post_guard_samps, Complex(0.0, 0.0));
+    return burst;
+}
+
 static bool recover_file_from_bits(
     const VecInt& rx_bits,
     const std::string& output_file_path,
@@ -1087,6 +1106,13 @@ TestResult run_one_test(
     else if (mode == RunMode::USRP)
     {
 #ifdef WITH_UHD
+        const VecComplex tx_usrp_burst = build_guarded_usrp_burst(
+            tx_burst,
+            kSingleCarrierUsrpPreGuardSamps,
+            kSingleCarrierUsrpPostGuardSamps);
+        const size_t rx_extra_samps =
+            static_cast<size_t>(kSingleCarrierUsrpRxExtraFrames) * one_frame_sig.size();
+
         USRPDriver::Config uc;
 
         uc.device_args = "type=b200";
@@ -1096,10 +1122,18 @@ TestResult run_one_test(
         USRPDriver usrp(uc);
         usrp.init();
 
-        usrp.start_rx_worker(tx_burst.size());
-        usrp.send_burst(tx_burst);
+        usrp.start_rx_worker(tx_usrp_burst.size() + rx_extra_samps);
+        std::this_thread::sleep_for(kSingleCarrierUsrpRxWarmup);
+        usrp.send_burst(tx_usrp_burst);
         usrp.wait_rx_worker();
         rx_sig = usrp.fetch_rx_buffer();
+
+        log << "[USRP TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+        log << "[USRP TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP RX EXTRA SAMPS] " << rx_extra_samps << "\n";
+        log << "[USRP RX WARMUP MS] "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierUsrpRxWarmup).count()
+            << "\n";
 #else
         throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
 #endif
@@ -1310,6 +1344,13 @@ TestResult run_file_transfer_test(
     else if (mode == RunMode::USRP)
     {
 #ifdef WITH_UHD
+        const VecComplex tx_usrp_burst = build_guarded_usrp_burst(
+            tx_burst,
+            kSingleCarrierUsrpPreGuardSamps,
+            kSingleCarrierUsrpPostGuardSamps);
+        const size_t rx_extra_samps =
+            static_cast<size_t>(kSingleCarrierUsrpRxExtraFrames) * first_frame_sig.size();
+
         USRPDriver::Config uc;
 
         uc.device_args = "type=b200";
@@ -1319,10 +1360,18 @@ TestResult run_file_transfer_test(
         USRPDriver usrp(uc);
         usrp.init();
 
-        usrp.start_rx_worker(tx_burst.size());
-        usrp.send_burst(tx_burst);
+        usrp.start_rx_worker(tx_usrp_burst.size() + rx_extra_samps);
+        std::this_thread::sleep_for(kSingleCarrierUsrpRxWarmup);
+        usrp.send_burst(tx_usrp_burst);
         usrp.wait_rx_worker();
         rx_sig = usrp.fetch_rx_buffer();
+
+        log << "[USRP TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+        log << "[USRP TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP RX EXTRA SAMPS] " << rx_extra_samps << "\n";
+        log << "[USRP RX WARMUP MS] "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierUsrpRxWarmup).count()
+            << "\n";
 #else
         throw std::runtime_error("USRP mode requested, but WITH_UHD is not enabled.");
 #endif

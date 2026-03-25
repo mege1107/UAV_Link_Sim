@@ -50,7 +50,7 @@ int main()
         // =========================
         // Unified test entry config
         // =========================
-        constexpr TestChain kChain = TestChain::OfdmRandomBits;
+        constexpr TestChain kChain = TestChain::SingleCarrierRandomBits;
         constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
         constexpr bool kPrintLogText = true;
 
@@ -59,7 +59,7 @@ int main()
         const std::string kUsrpDeviceArgs = "type=b200";
 
         // Single-carrier parameters
-        constexpr ModulationType kSingleCarrierModulation = ModulationType::QPSK;
+        constexpr ModulationType kSingleCarrierModulation = ModulationType::FSK;
         constexpr int kTxRepeatFrames = 20;
         constexpr double kInfoRateBps = 64000.0;
         constexpr int kHopPattern = 0;
