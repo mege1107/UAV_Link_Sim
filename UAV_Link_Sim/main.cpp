@@ -1,6 +1,7 @@
 ﻿#include <iostream>
 #include <stdexcept>
 
+#include "sim_runner.h"
 #include "role_runner.h"
 
 // ===== 固定参数（两台电脑必须一致）=====
@@ -8,7 +9,7 @@ static const std::string DEVICE_ARGS = "type=b200";
 static const double CENTER_FREQ = 433e6;
 static const double INFO_RATE = 50000.0;
 static const int HOP_PATTERN = 1;
-static const ModulationType MOD = ModulationType::QAM;
+static const ModulationType MOD = ModulationType::FSK;
 
 // TX 参数
 static const int TX_REPEAT = 5000;   // 多发几轮，防止对不上
