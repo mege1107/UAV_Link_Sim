@@ -30,6 +30,9 @@ struct RxOnlyResult {
     size_t rx_sample_count = 0;
     size_t decoded_bits_count = 0;
     size_t decoded_frames = 0;
+    size_t total_bit_errors = 0;
+    size_t total_compared_bits = 0;
+    double total_ber = 0.0;
     double fs = 0.0;
 
     std::vector<double> rx_waveform;
