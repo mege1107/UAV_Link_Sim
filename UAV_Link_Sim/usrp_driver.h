@@ -19,8 +19,8 @@ public:
 
         double sample_rate = 2e6;
         double center_freq = 2.45e9;
-        double tx_gain = 35.0;
-        double rx_gain = 40.0;
+        double tx_gain = 30.0;
+        double rx_gain = 30.0;
 
         std::string tx_antenna = "TX/RX";
         std::string rx_antenna = "RX2";

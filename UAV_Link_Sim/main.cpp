@@ -107,7 +107,7 @@ int main()
         // =========================
         // Unified test entry config
         // =========================
-        constexpr EntryMode kEntryMode = EntryMode::UnifiedLinkTest;
+        constexpr EntryMode kEntryMode = EntryMode::RoleTxOnly;
         constexpr TestChain kChain = TestChain::SingleCarrierRandomBits;
         constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
         constexpr bool kPrintLogText = true;
@@ -120,11 +120,11 @@ int main()
 
         // Single-carrier parameters
         constexpr ModulationType kSingleCarrierModulation = ModulationType::FSK;
-        constexpr int kTxRepeatFrames = 20;
+        constexpr int kTxRepeatFrames = 5000;
         constexpr double kInfoRateBps = 64000.0;
         constexpr int kHopPattern = 0;
         constexpr SourceMode kRoleSourceMode = SourceMode::RandomBits;
-        constexpr int kRoleExpectedFrames = 20;
+        constexpr int kRoleExpectedFrames = 120;
         constexpr int kRoleMaxFrames = 200;
 
         // File paths

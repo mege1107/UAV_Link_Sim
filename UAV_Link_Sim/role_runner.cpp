@@ -19,6 +19,9 @@
 
 namespace
 {
+    static constexpr size_t kSingleCarrierUsrpPreGuardSamps = 200000;
+    static constexpr size_t kSingleCarrierUsrpPostGuardSamps = 5000;
+    static constexpr int kSingleCarrierUsrpRxExtraFrames = 10;
 
     static std::vector<std::complex<double>> compute_dft(
         const std::vector<std::complex<double>>& x)
@@ -369,6 +372,19 @@ namespace
         return true;
     }
 
+    static VecComplex build_guarded_usrp_burst(
+        const VecComplex& payload,
+        size_t pre_guard_samps,
+        size_t post_guard_samps)
+    {
+        VecComplex burst;
+        burst.reserve(pre_guard_samps + payload.size() + post_guard_samps);
+        burst.insert(burst.end(), pre_guard_samps, Complex(0.0, 0.0));
+        burst.insert(burst.end(), payload.begin(), payload.end());
+        burst.insert(burst.end(), post_guard_samps, Complex(0.0, 0.0));
+        return burst;
+    }
+
     static VecComplex capture_rx_samples(
         const std::string& rx_device_args,
         double center_freq_hz,
@@ -548,14 +564,22 @@ TxOnlyResult run_tx_role_once(
         log << "[INPUT FILE] " << input_file_path << "\n";
     }
 
-    log << "[TX FRAME COUNT] " << tx_frame_count << "\n";
-    log << "[TX SAMPLE COUNT] " << tx_burst.size() << "\n";
+    const VecComplex tx_usrp_burst = build_guarded_usrp_burst(
+        tx_burst,
+        kSingleCarrierUsrpPreGuardSamps,
+        kSingleCarrierUsrpPostGuardSamps);
 
-    send_tx_samples(tx_device_args, center_freq_hz, cfg.fs, tx_burst, log);
+    log << "[TX FRAME COUNT] " << tx_frame_count << "\n";
+    log << "[TX PAYLOAD SAMPLE COUNT] " << tx_burst.size() << "\n";
+    log << "[TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+    log << "[TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+    log << "[TX SAMPLE COUNT] " << tx_usrp_burst.size() << "\n";
+
+    send_tx_samples(tx_device_args, center_freq_hz, cfg.fs, tx_usrp_burst, log);
 
     TxOnlyResult tr;
     tr.tx_frame_count = tx_frame_count;
-    tr.tx_sample_count = tx_burst.size();
+    tr.tx_sample_count = tx_usrp_burst.size();
     tr.fs = cfg.fs;
 
     {
@@ -633,7 +657,9 @@ RxOnlyResult run_rx_role_once(
     }
 
     const size_t single_frame_samples = ref_frame.size();
-    const size_t margin_samples = std::max<size_t>(single_frame_samples, 50000);
+    const size_t margin_samples = std::max<size_t>(
+        static_cast<size_t>(kSingleCarrierUsrpRxExtraFrames) * single_frame_samples,
+        static_cast<size_t>(50000));
     const size_t rx_need =
         single_frame_samples * static_cast<size_t>(expected_frames) + margin_samples;
 
@@ -649,6 +675,7 @@ RxOnlyResult run_rx_role_once(
     log << "[EXPECTED FRAMES] " << expected_frames << "\n";
     log << "[REF FRAME SAMPLES] " << single_frame_samples << "\n";
     log << "[RX NEED SAMPLES] " << rx_need << "\n";
+    log << "[RX EXTRA MARGIN] " << margin_samples << "\n";
 
     VecComplex rx_sig = capture_rx_samples(rx_device_args, center_freq_hz, cfg.fs, rx_need, log);
 
@@ -761,8 +788,11 @@ RxFileResult run_rx_file_role_once(
     }
 
     const size_t single_frame_samples = ref_frame.size();
+    const size_t margin_samples = std::max<size_t>(
+        static_cast<size_t>(kSingleCarrierUsrpRxExtraFrames) * single_frame_samples,
+        static_cast<size_t>(50000));
     const size_t rx_need =
-        single_frame_samples * static_cast<size_t>(max_frames);
+        single_frame_samples * static_cast<size_t>(max_frames) + margin_samples;
 
     Receiver rx(cfg);
 
@@ -770,6 +800,7 @@ RxFileResult run_rx_file_role_once(
     log << "[FS] " << cfg.fs << "\n";
     log << "[RX DEVICE ARGS] " << rx_device_args << "\n";
     log << "[RX NEED] " << rx_need << "\n";
+    log << "[RX EXTRA MARGIN] " << margin_samples << "\n";
 
     VecComplex rx_sig = capture_rx_samples(rx_device_args, center_freq_hz, cfg.fs, rx_need, log);
 
