@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <vector>
 #include <iostream>
+#include <chrono>
+#include <thread>
 
 #include "transmitter.h"
 #include "receiver.h"
@@ -22,6 +24,10 @@ namespace
     static constexpr size_t kSingleCarrierUsrpPreGuardSamps = 200000;
     static constexpr size_t kSingleCarrierUsrpPostGuardSamps = 5000;
     static constexpr int kSingleCarrierUsrpRxExtraFrames = 10;
+    static constexpr int kSingleCarrierFileSessionRepeats = 5;
+    static constexpr size_t kSingleCarrierFileInterBurstGapSamps = 1000000;
+    static constexpr auto kSingleCarrierFileListenTimeout = std::chrono::seconds(20);
+    static constexpr auto kSingleCarrierFilePollInterval = std::chrono::milliseconds(250);
 
     static std::vector<std::complex<double>> compute_dft(
         const std::vector<std::complex<double>>& x)
@@ -372,6 +378,64 @@ namespace
         return true;
     }
 
+    static bool try_extract_file_packet_from_bits(
+        const VecInt& rx_bits,
+        std::vector<unsigned char>& file_bytes,
+        std::string& recovered_filename,
+        size_t& packet_offset_bytes,
+        size_t& packet_total_bytes)
+    {
+        file_bytes.clear();
+        recovered_filename.clear();
+        packet_offset_bytes = 0;
+        packet_total_bytes = 0;
+
+        const std::vector<unsigned char> bytes = bits_to_bytes(rx_bits);
+        if (bytes.size() < 16) {
+            return false;
+        }
+
+        for (size_t pos = 0; pos + 16 <= bytes.size(); ++pos)
+        {
+            if (!(bytes[pos] == 'U' &&
+                bytes[pos + 1] == 'A' &&
+                bytes[pos + 2] == 'V' &&
+                bytes[pos + 3] == 'F')) {
+                continue;
+            }
+
+            const unsigned char version = bytes[pos + 4];
+            if (version != 1) {
+                continue;
+            }
+
+            const unsigned short filename_len = read_u16_be(bytes, pos + 6);
+            const unsigned long long file_size = read_u64_be(bytes, pos + 8);
+            const size_t header_size = 16ull + static_cast<size_t>(filename_len);
+            const size_t total_size = header_size + static_cast<size_t>(file_size);
+
+            if (pos + total_size > bytes.size()) {
+                continue;
+            }
+
+            recovered_filename.assign(
+                reinterpret_cast<const char*>(&bytes[pos + 16]),
+                reinterpret_cast<const char*>(&bytes[pos + 16 + filename_len])
+            );
+
+            file_bytes.assign(
+                bytes.begin() + static_cast<long long>(pos + header_size),
+                bytes.begin() + static_cast<long long>(pos + total_size)
+            );
+
+            packet_offset_bytes = pos;
+            packet_total_bytes = total_size;
+            return true;
+        }
+
+        return false;
+    }
+
     static VecComplex build_guarded_usrp_burst(
         const VecComplex& payload,
         size_t pre_guard_samps,
@@ -383,6 +447,30 @@ namespace
         burst.insert(burst.end(), payload.begin(), payload.end());
         burst.insert(burst.end(), post_guard_samps, Complex(0.0, 0.0));
         return burst;
+    }
+
+    static VecComplex build_repeated_usrp_session(
+        const VecComplex& guarded_burst,
+        int repeats,
+        size_t gap_samps)
+    {
+        if (repeats <= 1) {
+            return guarded_burst;
+        }
+
+        VecComplex session;
+        session.reserve(
+            guarded_burst.size() * static_cast<size_t>(repeats) +
+            gap_samps * static_cast<size_t>(std::max(0, repeats - 1)));
+
+        for (int i = 0; i < repeats; ++i) {
+            session.insert(session.end(), guarded_burst.begin(), guarded_burst.end());
+            if (i + 1 < repeats && gap_samps > 0) {
+                session.insert(session.end(), gap_samps, Complex(0.0, 0.0));
+            }
+        }
+
+        return session;
     }
 
     static VecComplex capture_rx_samples(
@@ -569,17 +657,29 @@ TxOnlyResult run_tx_role_once(
         kSingleCarrierUsrpPreGuardSamps,
         kSingleCarrierUsrpPostGuardSamps);
 
+    const int session_repeats =
+        (source_mode == SourceMode::FileBits) ? kSingleCarrierFileSessionRepeats : 1;
+    const size_t inter_burst_gap_samps =
+        (source_mode == SourceMode::FileBits) ? kSingleCarrierFileInterBurstGapSamps : 0;
+    const VecComplex tx_usrp_session = build_repeated_usrp_session(
+        tx_usrp_burst,
+        session_repeats,
+        inter_burst_gap_samps);
+
     log << "[TX FRAME COUNT] " << tx_frame_count << "\n";
     log << "[TX PAYLOAD SAMPLE COUNT] " << tx_burst.size() << "\n";
     log << "[TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
     log << "[TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
-    log << "[TX SAMPLE COUNT] " << tx_usrp_burst.size() << "\n";
+    log << "[TX BURST SAMPLE COUNT] " << tx_usrp_burst.size() << "\n";
+    log << "[TX SESSION REPEATS] " << session_repeats << "\n";
+    log << "[TX INTER BURST GAP] " << inter_burst_gap_samps << "\n";
+    log << "[TX SAMPLE COUNT] " << tx_usrp_session.size() << "\n";
 
-    send_tx_samples(tx_device_args, center_freq_hz, cfg.fs, tx_usrp_burst, log);
+    send_tx_samples(tx_device_args, center_freq_hz, cfg.fs, tx_usrp_session, log);
 
     TxOnlyResult tr;
     tr.tx_frame_count = tx_frame_count;
-    tr.tx_sample_count = tx_usrp_burst.size();
+    tr.tx_sample_count = tx_usrp_session.size();
     tr.fs = cfg.fs;
 
     {
@@ -791,81 +891,147 @@ RxFileResult run_rx_file_role_once(
     const size_t margin_samples = std::max<size_t>(
         static_cast<size_t>(kSingleCarrierUsrpRxExtraFrames) * single_frame_samples,
         static_cast<size_t>(50000));
-    const size_t rx_need =
-        single_frame_samples * static_cast<size_t>(max_frames) + margin_samples;
-
-    Receiver rx(cfg);
+    const size_t estimated_payload_samples =
+        single_frame_samples * static_cast<size_t>(max_frames);
+    const size_t estimated_guarded_burst_samples =
+        kSingleCarrierUsrpPreGuardSamps +
+        estimated_payload_samples +
+        kSingleCarrierUsrpPostGuardSamps;
+    const size_t estimated_session_samples =
+        estimated_guarded_burst_samples * static_cast<size_t>(kSingleCarrierFileSessionRepeats) +
+        kSingleCarrierFileInterBurstGapSamps *
+        static_cast<size_t>(std::max(0, kSingleCarrierFileSessionRepeats - 1));
+    const double listen_timeout_sec =
+        std::chrono::duration_cast<std::chrono::duration<double>>(kSingleCarrierFileListenTimeout).count();
+    const size_t timeout_limited_samples = static_cast<size_t>(cfg.fs * listen_timeout_sec);
+    const size_t rx_need = std::max(estimated_session_samples + margin_samples, timeout_limited_samples);
 
     log << "[ROLE] GROUND(RX FILE AUTO)\n";
     log << "[FS] " << cfg.fs << "\n";
     log << "[RX DEVICE ARGS] " << rx_device_args << "\n";
+    log << "[MAX FRAMES] " << max_frames << "\n";
+    log << "[EST PAYLOAD SAMPLES] " << estimated_payload_samples << "\n";
+    log << "[EST GUARDED BURST] " << estimated_guarded_burst_samples << "\n";
+    log << "[SESSION REPEATS] " << kSingleCarrierFileSessionRepeats << "\n";
+    log << "[INTER BURST GAP] " << kSingleCarrierFileInterBurstGapSamps << "\n";
+    log << "[EST SESSION SAMPLES] " << estimated_session_samples << "\n";
+    log << "[LISTEN TIMEOUT SEC] " << listen_timeout_sec << "\n";
+    log << "[POLL INTERVAL MS] "
+        << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierFilePollInterval).count()
+        << "\n";
     log << "[RX NEED] " << rx_need << "\n";
     log << "[RX EXTRA MARGIN] " << margin_samples << "\n";
 
-    VecComplex rx_sig = capture_rx_samples(rx_device_args, center_freq_hz, cfg.fs, rx_need, log);
+#ifdef WITH_UHD
+    USRPDriver::Config uc;
+    uc.device_args = rx_device_args;
+    uc.sample_rate = cfg.fs;
+    uc.center_freq = center_freq_hz;
+    uc.recv_timeout = 0.2;
 
-    if (rx_sig.empty()) {
-        throw std::runtime_error("RX signal empty");
-    }
+    USRPDriver usrp(uc);
+    usrp.init();
 
-    VecInt rx_bits = rx.receive(rx_sig);
+    log << "[USRP] RX device args = " << rx_device_args << "\n";
+    log << usrp.get_pp_string() << "\n";
+    log << "[RX MODE] continuous-listen-until-file-or-timeout\n";
 
-    log << "[RX BITS] " << rx_bits.size() << "\n";
+    usrp.start_rx_worker(rx_need);
 
-    std::vector<unsigned char> bytes = bits_to_bytes(rx_bits);
+    const auto listen_deadline = std::chrono::steady_clock::now() + kSingleCarrierFileListenTimeout;
+    const size_t min_attempt_samples = single_frame_samples;
+    size_t last_checked_samples = 0;
 
-    if (bytes.size() < 16) {
-        throw std::runtime_error("Not enough data for header");
-    }
+    VecComplex rx_sig;
+    VecInt rx_bits;
+    VecComplex last_constellation_points;
+    std::vector<unsigned char> recovered_file_bytes;
+    std::string recovered_filename;
+    size_t packet_offset_bytes = 0;
+    size_t packet_total_bytes = 0;
+    bool file_found = false;
 
-    size_t pos = 0;
-    bool found = false;
-
-    for (size_t i = 0; i + 4 <= bytes.size(); ++i)
+    while (std::chrono::steady_clock::now() < listen_deadline)
     {
-        if (bytes[i] == 'U' &&
-            bytes[i + 1] == 'A' &&
-            bytes[i + 2] == 'V' &&
-            bytes[i + 3] == 'F')
+        std::this_thread::sleep_for(kSingleCarrierFilePollInterval);
+
+        rx_sig = usrp.fetch_rx_buffer();
+        if (rx_sig.size() < min_attempt_samples) {
+            continue;
+        }
+
+        const size_t new_samples = rx_sig.size() - std::min(last_checked_samples, rx_sig.size());
+        if (new_samples < single_frame_samples && last_checked_samples != 0) {
+            continue;
+        }
+        last_checked_samples = rx_sig.size();
+
+        log << "[LISTEN] samples=" << rx_sig.size() << " attempting_decode=1\n";
+
+        Receiver rx_attempt(cfg);
+        rx_bits = rx_attempt.receive(rx_sig);
+        last_constellation_points = rx_attempt.getLastConstellationPoints();
+        log << "[LISTEN] decoded_bits=" << rx_bits.size() << "\n";
+
+        if (try_extract_file_packet_from_bits(
+            rx_bits,
+            recovered_file_bytes,
+            recovered_filename,
+            packet_offset_bytes,
+            packet_total_bytes))
         {
-            pos = i;
-            found = true;
+            file_found = true;
+            log << "[LISTEN] file_packet_detected=1"
+                << " packet_offset_bytes=" << packet_offset_bytes
+                << " packet_total_bytes=" << packet_total_bytes
+                << "\n";
             break;
         }
     }
 
-    if (!found) {
-        throw std::runtime_error("UAVF header not found");
+    usrp.stop_rx_worker();
+    usrp.wait_rx_worker();
+
+    rx_sig = usrp.fetch_rx_buffer();
+    log << "[USRP] RX capture complete\n";
+    log << "[USRP] RX captured samples = " << rx_sig.size() << "\n";
+
+    if (!file_found) {
+        Receiver rx_attempt(cfg);
+        rx_bits = rx_attempt.receive(rx_sig);
+        last_constellation_points = rx_attempt.getLastConstellationPoints();
+        log << "[LISTEN][FINAL] decoded_bits=" << rx_bits.size() << "\n";
+
+        if (try_extract_file_packet_from_bits(
+            rx_bits,
+            recovered_file_bytes,
+            recovered_filename,
+            packet_offset_bytes,
+            packet_total_bytes))
+        {
+            file_found = true;
+            log << "[LISTEN][FINAL] file_packet_detected=1"
+                << " packet_offset_bytes=" << packet_offset_bytes
+                << " packet_total_bytes=" << packet_total_bytes
+                << "\n";
+        }
     }
 
-    const unsigned short filename_len = read_u16_be(bytes, pos + 6);
-    const unsigned long long file_size = read_u64_be(bytes, pos + 8);
-
-    const size_t header_size = 16ull + filename_len;
-    const size_t total_size = header_size + static_cast<size_t>(file_size);
-
-    log << "[FILE SIZE] " << file_size << "\n";
-    log << "[HEADER SIZE] " << header_size << "\n";
-    log << "[TOTAL SIZE] " << total_size << "\n";
-
-    if (bytes.size() < pos + total_size) {
-        throw std::runtime_error("RX data not enough for full file");
+    if (!file_found) {
+        throw std::runtime_error("Listen timeout: file packet not detected before timeout");
     }
-
-    std::string recovered_filename(
-        reinterpret_cast<const char*>(&bytes[pos + 16]),
-        reinterpret_cast<const char*>(&bytes[pos + 16 + filename_len])
-    );
 
     std::ofstream ofs(output_file_path, std::ios::binary);
     if (!ofs) {
         throw std::runtime_error("Cannot open output file for writing: " + output_file_path);
     }
 
-    ofs.write(
-        reinterpret_cast<const char*>(&bytes[pos + header_size]),
-        static_cast<std::streamsize>(file_size)
-    );
+    if (!recovered_file_bytes.empty()) {
+        ofs.write(
+            reinterpret_cast<const char*>(recovered_file_bytes.data()),
+            static_cast<std::streamsize>(recovered_file_bytes.size())
+        );
+    }
 
     RxFileResult rr;
 
@@ -878,12 +1044,17 @@ RxFileResult run_rx_file_role_once(
     rr.recovered_filename = recovered_filename;
     rr.saved_file_path = output_file_path;
 
-    build_constellation_result(rx.getLastConstellationPoints(), rr);
+    build_constellation_result(last_constellation_points, rr);
 
     log << "FILE RECOVERED = YES\n";
     log << "FILENAME = " << recovered_filename << "\n";
+    log << "[FILE BYTES] " << recovered_file_bytes.size() << "\n";
 
     rr.log_text = log.str();
-
     return rr;
+#else
+    (void)rx_device_args;
+    (void)center_freq_hz;
+    throw std::runtime_error("RX file role requires WITH_UHD enabled.");
+#endif
 }
