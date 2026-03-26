@@ -27,7 +27,7 @@ namespace
     static constexpr int kSingleCarrierFileSessionRepeats = 5;
     static constexpr size_t kSingleCarrierFileInterBurstGapSamps = 1000000;
     static constexpr auto kSingleCarrierFileListenTimeout = std::chrono::seconds(20);
-    static constexpr auto kSingleCarrierFilePollInterval = std::chrono::milliseconds(250);
+    static constexpr auto kSingleCarrierFilePollInterval = std::chrono::milliseconds(1000);
 
     static std::vector<std::complex<double>> compute_dft(
         const std::vector<std::complex<double>>& x)
@@ -901,11 +901,9 @@ RxFileResult run_rx_file_role_once(
         estimated_guarded_burst_samples * static_cast<size_t>(kSingleCarrierFileSessionRepeats) +
         kSingleCarrierFileInterBurstGapSamps *
         static_cast<size_t>(std::max(0, kSingleCarrierFileSessionRepeats - 1));
-    const size_t rolling_decode_window =
-        estimated_guarded_burst_samples +
-        kSingleCarrierFileInterBurstGapSamps +
-        kSingleCarrierUsrpPreGuardSamps +
-        margin_samples;
+    const size_t decode_step_samples = std::max<size_t>(
+        single_frame_samples * static_cast<size_t>(16),
+        std::max<size_t>(estimated_guarded_burst_samples / 4, single_frame_samples));
     const double listen_timeout_sec =
         std::chrono::duration_cast<std::chrono::duration<double>>(kSingleCarrierFileListenTimeout).count();
     const size_t timeout_limited_samples = static_cast<size_t>(cfg.fs * listen_timeout_sec);
@@ -920,7 +918,7 @@ RxFileResult run_rx_file_role_once(
     log << "[SESSION REPEATS] " << kSingleCarrierFileSessionRepeats << "\n";
     log << "[INTER BURST GAP] " << kSingleCarrierFileInterBurstGapSamps << "\n";
     log << "[EST SESSION SAMPLES] " << estimated_session_samples << "\n";
-    log << "[ROLLING DECODE WINDOW] " << rolling_decode_window << "\n";
+    log << "[DECODE STEP SAMPLES] " << decode_step_samples << "\n";
     log << "[LISTEN TIMEOUT SEC] " << listen_timeout_sec << "\n";
     log << "[POLL INTERVAL MS] "
         << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierFilePollInterval).count()
@@ -974,18 +972,11 @@ RxFileResult run_rx_file_role_once(
         samples_since_last_decode += new_samples.size();
         rx_sig.insert(rx_sig.end(), new_samples.begin(), new_samples.end());
 
-        if (rx_sig.size() > rolling_decode_window) {
-            const size_t keep_from = rx_sig.size() - rolling_decode_window;
-            rx_sig = VecComplex(
-                rx_sig.begin() + static_cast<long long>(keep_from),
-                rx_sig.end());
-        }
-
         if (rx_sig.size() < min_attempt_samples) {
             continue;
         }
 
-        if (samples_since_last_decode < single_frame_samples) {
+        if (samples_since_last_decode < decode_step_samples) {
             continue;
         }
         samples_since_last_decode = 0;
@@ -1023,12 +1014,6 @@ RxFileResult run_rx_file_role_once(
         VecComplex new_samples = usrp.fetch_rx_samples_since(rx_cursor, &total_after_fetch);
         total_captured_samples = total_after_fetch;
         rx_sig.insert(rx_sig.end(), new_samples.begin(), new_samples.end());
-        if (rx_sig.size() > rolling_decode_window) {
-            const size_t keep_from = rx_sig.size() - rolling_decode_window;
-            rx_sig = VecComplex(
-                rx_sig.begin() + static_cast<long long>(keep_from),
-                rx_sig.end());
-        }
     }
 
     log << "[USRP] RX capture complete\n";
