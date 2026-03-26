@@ -901,11 +901,11 @@ RxFileResult run_rx_file_role_once(
         estimated_guarded_burst_samples * static_cast<size_t>(kSingleCarrierFileSessionRepeats) +
         kSingleCarrierFileInterBurstGapSamps *
         static_cast<size_t>(std::max(0, kSingleCarrierFileSessionRepeats - 1));
+    const size_t rx_window_samples = estimated_session_samples + margin_samples;
     const double listen_timeout_sec =
         std::chrono::duration_cast<std::chrono::duration<double>>(kSingleCarrierFileListenTimeout).count();
-    const size_t timeout_limited_samples = static_cast<size_t>(cfg.fs * listen_timeout_sec);
-    const size_t rx_need = std::max(estimated_session_samples + margin_samples, timeout_limited_samples);
-    const size_t min_decode_advance = std::max(single_frame_samples, estimated_guarded_burst_samples);
+    const double rx_window_sec =
+        (cfg.fs > 0.0) ? (static_cast<double>(rx_window_samples) / cfg.fs) : 0.0;
 
     log << "[ROLE] GROUND(RX FILE AUTO)\n";
     log << "[FS] " << cfg.fs << "\n";
@@ -920,8 +920,8 @@ RxFileResult run_rx_file_role_once(
     log << "[POLL INTERVAL MS] "
         << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierFilePollInterval).count()
         << "\n";
-    log << "[MIN DECODE ADVANCE] " << min_decode_advance << "\n";
-    log << "[RX NEED] " << rx_need << "\n";
+    log << "[RX WINDOW SAMPLES] " << rx_window_samples << "\n";
+    log << "[RX WINDOW SEC] " << rx_window_sec << "\n";
     log << "[RX EXTRA MARGIN] " << margin_samples << "\n";
 
 #ifdef WITH_UHD
@@ -936,13 +936,11 @@ RxFileResult run_rx_file_role_once(
 
     log << "[USRP] RX device args = " << rx_device_args << "\n";
     log << usrp.get_pp_string() << "\n";
-    log << "[RX MODE] continuous-listen-until-file-or-timeout\n";
-
-    usrp.start_rx_worker(rx_need);
+    log << "[RX MODE] windowed-listen-until-file-or-timeout\n";
 
     const auto listen_deadline = std::chrono::steady_clock::now() + kSingleCarrierFileListenTimeout;
     const size_t min_attempt_samples = single_frame_samples;
-    size_t last_checked_samples = 0;
+    size_t listen_attempt = 0;
 
     VecComplex rx_sig;
     VecInt rx_bits;
@@ -955,25 +953,27 @@ RxFileResult run_rx_file_role_once(
 
     while (std::chrono::steady_clock::now() < listen_deadline)
     {
-        std::this_thread::sleep_for(kSingleCarrierFilePollInterval);
+        ++listen_attempt;
+        usrp.start_rx_worker(rx_window_samples);
 
-        const size_t ready_samples = usrp.get_rx_sample_count();
-        if (ready_samples < min_attempt_samples) {
-            if (!usrp.is_rx_running()) {
-                break;
-            }
-            continue;
+        while (usrp.is_rx_running() && std::chrono::steady_clock::now() < listen_deadline) {
+            std::this_thread::sleep_for(kSingleCarrierFilePollInterval);
         }
 
-        const size_t new_samples = ready_samples - std::min(last_checked_samples, ready_samples);
-        if (new_samples < min_decode_advance && last_checked_samples != 0 && usrp.is_rx_running()) {
-            continue;
+        if (usrp.is_rx_running()) {
+            usrp.stop_rx_worker();
         }
+        usrp.wait_rx_worker();
 
         rx_sig = usrp.fetch_rx_buffer();
-        last_checked_samples = rx_sig.size();
+        log << "[LISTEN] attempt=" << listen_attempt
+            << " samples=" << rx_sig.size()
+            << " attempting_decode=" << (rx_sig.size() >= min_attempt_samples ? 1 : 0)
+            << "\n";
 
-        log << "[LISTEN] samples=" << rx_sig.size() << " attempting_decode=1\n";
+        if (rx_sig.size() < min_attempt_samples) {
+            continue;
+        }
 
         Receiver rx_attempt(cfg);
         rx_bits = rx_attempt.receive(rx_sig);
@@ -993,34 +993,6 @@ RxFileResult run_rx_file_role_once(
                 << " packet_total_bytes=" << packet_total_bytes
                 << "\n";
             break;
-        }
-    }
-
-    usrp.stop_rx_worker();
-    usrp.wait_rx_worker();
-
-    rx_sig = usrp.fetch_rx_buffer();
-    log << "[USRP] RX capture complete\n";
-    log << "[USRP] RX captured samples = " << rx_sig.size() << "\n";
-
-    if (!file_found) {
-        Receiver rx_attempt(cfg);
-        rx_bits = rx_attempt.receive(rx_sig);
-        last_constellation_points = rx_attempt.getLastConstellationPoints();
-        log << "[LISTEN][FINAL] decoded_bits=" << rx_bits.size() << "\n";
-
-        if (try_extract_file_packet_from_bits(
-            rx_bits,
-            recovered_file_bytes,
-            recovered_filename,
-            packet_offset_bytes,
-            packet_total_bytes))
-        {
-            file_found = true;
-            log << "[LISTEN][FINAL] file_packet_detected=1"
-                << " packet_offset_bytes=" << packet_offset_bytes
-                << " packet_total_bytes=" << packet_total_bytes
-                << "\n";
         }
     }
 
