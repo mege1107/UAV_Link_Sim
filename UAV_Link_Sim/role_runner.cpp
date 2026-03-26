@@ -901,6 +901,11 @@ RxFileResult run_rx_file_role_once(
         estimated_guarded_burst_samples * static_cast<size_t>(kSingleCarrierFileSessionRepeats) +
         kSingleCarrierFileInterBurstGapSamps *
         static_cast<size_t>(std::max(0, kSingleCarrierFileSessionRepeats - 1));
+    const size_t rolling_decode_window =
+        estimated_guarded_burst_samples +
+        kSingleCarrierFileInterBurstGapSamps +
+        kSingleCarrierUsrpPreGuardSamps +
+        margin_samples;
     const double listen_timeout_sec =
         std::chrono::duration_cast<std::chrono::duration<double>>(kSingleCarrierFileListenTimeout).count();
     const size_t timeout_limited_samples = static_cast<size_t>(cfg.fs * listen_timeout_sec);
@@ -915,6 +920,7 @@ RxFileResult run_rx_file_role_once(
     log << "[SESSION REPEATS] " << kSingleCarrierFileSessionRepeats << "\n";
     log << "[INTER BURST GAP] " << kSingleCarrierFileInterBurstGapSamps << "\n";
     log << "[EST SESSION SAMPLES] " << estimated_session_samples << "\n";
+    log << "[ROLLING DECODE WINDOW] " << rolling_decode_window << "\n";
     log << "[LISTEN TIMEOUT SEC] " << listen_timeout_sec << "\n";
     log << "[POLL INTERVAL MS] "
         << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierFilePollInterval).count()
@@ -940,7 +946,9 @@ RxFileResult run_rx_file_role_once(
 
     const auto listen_deadline = std::chrono::steady_clock::now() + kSingleCarrierFileListenTimeout;
     const size_t min_attempt_samples = single_frame_samples;
-    size_t last_checked_samples = 0;
+    size_t rx_cursor = 0;
+    size_t total_captured_samples = 0;
+    size_t samples_since_last_decode = 0;
 
     VecComplex rx_sig;
     VecInt rx_bits;
@@ -955,18 +963,36 @@ RxFileResult run_rx_file_role_once(
     {
         std::this_thread::sleep_for(kSingleCarrierFilePollInterval);
 
-        rx_sig = usrp.fetch_rx_buffer();
+        size_t total_after_fetch = 0;
+        VecComplex new_samples = usrp.fetch_rx_samples_since(rx_cursor, &total_after_fetch);
+        total_captured_samples = total_after_fetch;
+        if (new_samples.empty()) {
+            continue;
+        }
+
+        rx_cursor = total_after_fetch;
+        samples_since_last_decode += new_samples.size();
+        rx_sig.insert(rx_sig.end(), new_samples.begin(), new_samples.end());
+
+        if (rx_sig.size() > rolling_decode_window) {
+            const size_t keep_from = rx_sig.size() - rolling_decode_window;
+            rx_sig = VecComplex(
+                rx_sig.begin() + static_cast<long long>(keep_from),
+                rx_sig.end());
+        }
+
         if (rx_sig.size() < min_attempt_samples) {
             continue;
         }
 
-        const size_t new_samples = rx_sig.size() - std::min(last_checked_samples, rx_sig.size());
-        if (new_samples < single_frame_samples && last_checked_samples != 0) {
+        if (samples_since_last_decode < single_frame_samples) {
             continue;
         }
-        last_checked_samples = rx_sig.size();
+        samples_since_last_decode = 0;
 
-        log << "[LISTEN] samples=" << rx_sig.size() << " attempting_decode=1\n";
+        log << "[LISTEN] total_captured_samples=" << total_captured_samples
+            << " buffered_samples=" << rx_sig.size()
+            << " attempting_decode=1\n";
 
         Receiver rx_attempt(cfg);
         rx_bits = rx_attempt.receive(rx_sig);
@@ -992,9 +1018,22 @@ RxFileResult run_rx_file_role_once(
     usrp.stop_rx_worker();
     usrp.wait_rx_worker();
 
-    rx_sig = usrp.fetch_rx_buffer();
+    {
+        size_t total_after_fetch = 0;
+        VecComplex new_samples = usrp.fetch_rx_samples_since(rx_cursor, &total_after_fetch);
+        total_captured_samples = total_after_fetch;
+        rx_sig.insert(rx_sig.end(), new_samples.begin(), new_samples.end());
+        if (rx_sig.size() > rolling_decode_window) {
+            const size_t keep_from = rx_sig.size() - rolling_decode_window;
+            rx_sig = VecComplex(
+                rx_sig.begin() + static_cast<long long>(keep_from),
+                rx_sig.end());
+        }
+    }
+
     log << "[USRP] RX capture complete\n";
-    log << "[USRP] RX captured samples = " << rx_sig.size() << "\n";
+    log << "[USRP] RX captured samples = " << total_captured_samples << "\n";
+    log << "[USRP] RX buffered samples for final decode = " << rx_sig.size() << "\n";
 
     if (!file_found) {
         Receiver rx_attempt(cfg);
@@ -1035,7 +1074,7 @@ RxFileResult run_rx_file_role_once(
 
     RxFileResult rr;
 
-    rr.rx_sample_count = rx_sig.size();
+    rr.rx_sample_count = total_captured_samples;
     rr.decoded_bits_count = rx_bits.size();
     rr.decoded_frames = rx_bits.size() / (cfg.frame_bit * cfg.n);
     rr.fs = cfg.fs;

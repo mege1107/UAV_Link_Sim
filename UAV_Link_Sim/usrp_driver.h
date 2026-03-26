@@ -47,6 +47,8 @@ public:
     void stop_rx_worker();
     void wait_rx_worker();
     VecComplex fetch_rx_buffer();
+    VecComplex fetch_rx_samples_since(size_t start_index, size_t* out_total_samps = nullptr);
+    size_t rx_buffer_size();
 
 private:
     void rx_worker_loop(size_t target_samps);

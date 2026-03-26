@@ -108,7 +108,7 @@ int main()
         // Unified test entry config
         // =========================
         constexpr EntryMode kEntryMode = EntryMode::RoleTxOnly;
-        constexpr TestChain kChain = TestChain::SingleCarrierFileTransfer;
+        constexpr TestChain kChain = TestChain::SingleCarrierRandomBits;
         constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
         constexpr bool kPrintLogText = true;
 
@@ -120,15 +120,15 @@ int main()
 
         // Single-carrier parameters
         constexpr ModulationType kSingleCarrierModulation = ModulationType::FSK;
-        constexpr int kTxRepeatFrames = 5000;
-        constexpr double kInfoRateBps = 8000.0;
+        constexpr int kTxRepeatFrames = 1000;
+        constexpr double kInfoRateBps = 128000.0;
         constexpr int kHopPattern = 0;
         constexpr SourceMode kRoleSourceMode = SourceMode::FileBits;
         constexpr int kRoleExpectedFrames = 120;
         constexpr int kRoleMaxFrames = 200;
 
         // File paths
-        const std::string kInputFilePath =  "D:\\linksim\\test_files\\test.txt";
+        const std::string kInputFilePath =  "D:\\linksim\\test_files\\test2.jpg";
         const std::string kOutputFilePath = "D:\\linksim\\test_files\\out_main.txt";
 
         // OFDM channel impairments used in AWGN mode
