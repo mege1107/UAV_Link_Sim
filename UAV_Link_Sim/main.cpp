@@ -121,7 +121,7 @@ int main()
         // Single-carrier parameters
         constexpr ModulationType kSingleCarrierModulation = ModulationType::FSK;
         constexpr int kTxRepeatFrames = 5000;
-        constexpr double kInfoRateBps = 8000.0;
+        constexpr double kInfoRateBps = 64000.0;
         constexpr int kHopPattern = 0;
         constexpr SourceMode kRoleSourceMode = SourceMode::FileBits;
         constexpr int kRoleExpectedFrames = 120;

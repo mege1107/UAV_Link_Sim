@@ -69,6 +69,17 @@ double choose_b2xx_master_clock_rate(double sample_rate)
 
     return 0.0;
 }
+
+int16_t quantize_sc16(double x)
+{
+    if (!std::isfinite(x)) {
+        return 0;
+    }
+
+    const double clipped = std::max(-1.0, std::min(1.0, x));
+    const long q = std::lround(clipped * 32767.0);
+    return static_cast<int16_t>(q);
+}
 } // namespace
 
 USRPDriver::USRPDriver(const Config& cfg) : cfg_(cfg) {}
@@ -86,7 +97,8 @@ void USRPDriver::init() {
     effective_device_args_ = cfg_.device_args;
     const bool b2xx_hint = looks_like_b2xx_args(effective_device_args_);
     if (b2xx_hint) {
-        append_device_arg_if_missing(effective_device_args_, "recv_frame_size", "1024");
+        append_device_arg_if_missing(effective_device_args_, "recv_frame_size", "1032");
+        append_device_arg_if_missing(effective_device_args_, "send_frame_size", "1032");
     }
 
     usrp_ = uhd::usrp::multi_usrp::make(effective_device_args_);
@@ -131,8 +143,8 @@ void USRPDriver::init() {
     actual_rx_rate_ = usrp_->get_rx_rate();
     actual_tx_rate_ = usrp_->get_tx_rate();
 
-    uhd::stream_args_t tx_args("fc32", "sc16");
-    uhd::stream_args_t rx_args("fc32", "sc16");
+    uhd::stream_args_t tx_args("sc16", "sc16");
+    uhd::stream_args_t rx_args("sc16", "sc16");
 
     tx_args.channels = { 0 };
     rx_args.channels = { 0 };
@@ -158,12 +170,13 @@ size_t USRPDriver::send_burst(const VecComplex& samples) {
         throw std::runtime_error("USRP not initialized");
     }
 
-    std::vector<std::complex<float>> buff(samples.size());
+    uhd::set_thread_priority_safe();
+
+    std::vector<std::complex<int16_t>> buff(samples.size());
     for (size_t i = 0; i < samples.size(); ++i) {
-        buff[i] = std::complex<float>(
-            static_cast<float>(samples[i].real()),
-            static_cast<float>(samples[i].imag())
-        );
+        buff[i] = std::complex<int16_t>(
+            quantize_sc16(samples[i].real()),
+            quantize_sc16(samples[i].imag()));
     }
 
     uhd::tx_metadata_t md;
@@ -236,8 +249,8 @@ VecComplex USRPDriver::fetch_rx_buffer() {
     for (size_t i = 0; i < valid_samps; ++i) {
         const auto& s = rx_buffer_raw_[i];
         out.emplace_back(
-            static_cast<double>(s.real()),
-            static_cast<double>(s.imag()));
+            static_cast<double>(s.real()) / 32768.0,
+            static_cast<double>(s.imag()) / 32768.0);
     }
 
     return out;
@@ -247,9 +260,9 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
     try {
         uhd::set_thread_priority_safe();
 
-        uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+        uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE);
         cmd.stream_now = true;
-        cmd.num_samps = 0;
+        cmd.num_samps = target_samps;
         rx_stream_->issue_stream_cmd(cmd);
 
         const size_t max_samps = rx_stream_->get_max_num_samps();
@@ -294,8 +307,6 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
             }
         }
 
-        uhd::stream_cmd_t stop_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
-        rx_stream_->issue_stream_cmd(stop_cmd);
     }
     catch (const std::exception& e) {
         std::cerr << "[UHD][RX THREAD EXCEPTION] " << e.what() << "\n";
