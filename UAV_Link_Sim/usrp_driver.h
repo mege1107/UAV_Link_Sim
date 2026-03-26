@@ -4,10 +4,10 @@
 #include <uhd/stream.hpp>
 #include <atomic>
 #include <thread>
-#include <mutex>
 #include <vector>
 #include <complex>
 #include <string>
+#include <cstddef>
 
 using Complex = std::complex<double>;
 using VecComplex = std::vector<Complex>;
@@ -46,6 +46,8 @@ public:
     void start_rx_worker(size_t target_samps);
     void stop_rx_worker();
     void wait_rx_worker();
+    bool is_rx_running() const;
+    size_t get_rx_sample_count() const;
     VecComplex fetch_rx_buffer();
 
 private:
@@ -60,8 +62,9 @@ private:
 
     std::atomic<bool> rx_stop_flag_{ false };
     std::atomic<bool> rx_running_{ false };
+    std::atomic<size_t> rx_valid_samps_{ 0 };
+    std::atomic<int> rx_overflow_count_{ 0 };
     std::thread rx_thread_;
 
-    std::mutex rx_mutex_;
-    VecComplex rx_buffer_;
+    std::vector<std::complex<float>> rx_buffer_raw_;
 };

@@ -905,6 +905,7 @@ RxFileResult run_rx_file_role_once(
         std::chrono::duration_cast<std::chrono::duration<double>>(kSingleCarrierFileListenTimeout).count();
     const size_t timeout_limited_samples = static_cast<size_t>(cfg.fs * listen_timeout_sec);
     const size_t rx_need = std::max(estimated_session_samples + margin_samples, timeout_limited_samples);
+    const size_t min_decode_advance = std::max(single_frame_samples, estimated_guarded_burst_samples);
 
     log << "[ROLE] GROUND(RX FILE AUTO)\n";
     log << "[FS] " << cfg.fs << "\n";
@@ -919,6 +920,7 @@ RxFileResult run_rx_file_role_once(
     log << "[POLL INTERVAL MS] "
         << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierFilePollInterval).count()
         << "\n";
+    log << "[MIN DECODE ADVANCE] " << min_decode_advance << "\n";
     log << "[RX NEED] " << rx_need << "\n";
     log << "[RX EXTRA MARGIN] " << margin_samples << "\n";
 
@@ -955,15 +957,20 @@ RxFileResult run_rx_file_role_once(
     {
         std::this_thread::sleep_for(kSingleCarrierFilePollInterval);
 
-        rx_sig = usrp.fetch_rx_buffer();
-        if (rx_sig.size() < min_attempt_samples) {
+        const size_t ready_samples = usrp.get_rx_sample_count();
+        if (ready_samples < min_attempt_samples) {
+            if (!usrp.is_rx_running()) {
+                break;
+            }
             continue;
         }
 
-        const size_t new_samples = rx_sig.size() - std::min(last_checked_samples, rx_sig.size());
-        if (new_samples < single_frame_samples && last_checked_samples != 0) {
+        const size_t new_samples = ready_samples - std::min(last_checked_samples, ready_samples);
+        if (new_samples < min_decode_advance && last_checked_samples != 0 && usrp.is_rx_running()) {
             continue;
         }
+
+        rx_sig = usrp.fetch_rx_buffer();
         last_checked_samples = rx_sig.size();
 
         log << "[LISTEN] samples=" << rx_sig.size() << " attempting_decode=1\n";

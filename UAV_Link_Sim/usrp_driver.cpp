@@ -110,13 +110,11 @@ void USRPDriver::start_rx_worker(size_t target_samps) {
         throw std::runtime_error("RX worker already running");
     }
 
-    {
-        std::lock_guard<std::mutex> lock(rx_mutex_);
-        rx_buffer_.clear();
-        rx_buffer_.reserve(target_samps);
-    }
-
     rx_stop_flag_ = false;
+    rx_valid_samps_ = 0;
+    rx_overflow_count_ = 0;
+    rx_buffer_raw_.clear();
+    rx_buffer_raw_.resize(target_samps);
     rx_running_ = true;
     rx_thread_ = std::thread(&USRPDriver::rx_worker_loop, this, target_samps);
 }
@@ -131,9 +129,27 @@ void USRPDriver::wait_rx_worker() {
     }
 }
 
+bool USRPDriver::is_rx_running() const {
+    return rx_running_.load(std::memory_order_acquire);
+}
+
+size_t USRPDriver::get_rx_sample_count() const {
+    return rx_valid_samps_.load(std::memory_order_acquire);
+}
+
 VecComplex USRPDriver::fetch_rx_buffer() {
-    std::lock_guard<std::mutex> lock(rx_mutex_);
-    return rx_buffer_;
+    const size_t valid_samps = rx_valid_samps_.load(std::memory_order_acquire);
+    VecComplex out;
+    out.reserve(valid_samps);
+
+    for (size_t i = 0; i < valid_samps; ++i) {
+        const auto& s = rx_buffer_raw_[i];
+        out.emplace_back(
+            static_cast<double>(s.real()),
+            static_cast<double>(s.imag()));
+    }
+
+    return out;
 }
 
 void USRPDriver::rx_worker_loop(size_t target_samps) {
@@ -144,28 +160,28 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
         rx_stream_->issue_stream_cmd(cmd);
 
         const size_t max_samps = rx_stream_->get_max_num_samps();
-        std::vector<std::complex<float>> buff(max_samps);
         uhd::rx_metadata_t md;
 
         size_t recv_total = 0;
-        int overflow_count = 0;
 
         while (!rx_stop_flag_ && recv_total < target_samps) {
             size_t want = std::min(max_samps, target_samps - recv_total);
 
-            size_t n = rx_stream_->recv(buff.data(), want, md, cfg_.recv_timeout, false);
+            size_t n = rx_stream_->recv(
+                rx_buffer_raw_.data() + static_cast<std::ptrdiff_t>(recv_total),
+                want,
+                md,
+                cfg_.recv_timeout,
+                false);
 
             if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
                 continue;
             }
 
             if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
-                ++overflow_count;
+                const int overflow_count =
+                    rx_overflow_count_.fetch_add(1, std::memory_order_relaxed) + 1;
                 std::cerr << "[UHD][RX] Overflow count = " << overflow_count << "\n";
-                if (overflow_count >= 5) {
-                    std::cerr << "[UHD][RX] Too many overflows, stop RX\n";
-                    break;
-                }
                 continue;
             }
 
@@ -175,14 +191,8 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
             }
 
             if (n > 0) {
-                std::lock_guard<std::mutex> lock(rx_mutex_);
-                for (size_t i = 0; i < n; ++i) {
-                    rx_buffer_.emplace_back(
-                        static_cast<double>(buff[i].real()),
-                        static_cast<double>(buff[i].imag())
-                    );
-                }
                 recv_total += n;
+                rx_valid_samps_.store(recv_total, std::memory_order_release);
             }
         }
 
