@@ -3,6 +3,73 @@
 #include <stdexcept>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <sstream>
+
+namespace {
+bool has_device_arg_key(const std::string& args, const std::string& key)
+{
+    const std::string needle = key + "=";
+    size_t pos = args.find(needle);
+    while (pos != std::string::npos) {
+        if (pos == 0 || args[pos - 1] == ',') {
+            return true;
+        }
+        pos = args.find(needle, pos + needle.size());
+    }
+    return false;
+}
+
+void append_device_arg_if_missing(std::string& args, const std::string& key, const std::string& value)
+{
+    if (has_device_arg_key(args, key)) {
+        return;
+    }
+
+    if (!args.empty() && args.back() != ',') {
+        args.push_back(',');
+    }
+    args += key;
+    args.push_back('=');
+    args += value;
+}
+
+bool looks_like_b2xx_args(const std::string& args)
+{
+    return args.find("type=b200") != std::string::npos ||
+        args.find("type=b210") != std::string::npos ||
+        args.find("type=b200mini") != std::string::npos ||
+        args.find("type=b205mini") != std::string::npos ||
+        args.find("type=b206mini") != std::string::npos;
+}
+
+double choose_b2xx_master_clock_rate(double sample_rate)
+{
+    if (!std::isfinite(sample_rate) || sample_rate <= 0.0) {
+        return 0.0;
+    }
+
+    static constexpr double kMinMcr = 5e6;
+    static constexpr double kMaxRecommendedMcr = 56e6;
+    static constexpr double kMaxAbsoluteMcr = 61.44e6;
+
+    for (int mult = 128; mult >= 1; --mult) {
+        const double cand = sample_rate * static_cast<double>(mult);
+        if (cand >= kMinMcr && cand <= kMaxRecommendedMcr) {
+            return cand;
+        }
+    }
+
+    for (int mult = 128; mult >= 1; --mult) {
+        const double cand = sample_rate * static_cast<double>(mult);
+        if (cand >= kMinMcr && cand <= kMaxAbsoluteMcr) {
+            return cand;
+        }
+    }
+
+    return 0.0;
+}
+} // namespace
 
 USRPDriver::USRPDriver(const Config& cfg) : cfg_(cfg) {}
 
@@ -16,7 +83,20 @@ USRPDriver::~USRPDriver() {
 }
 
 void USRPDriver::init() {
-    usrp_ = uhd::usrp::multi_usrp::make(cfg_.device_args);
+    effective_device_args_ = cfg_.device_args;
+    const bool b2xx_hint = looks_like_b2xx_args(effective_device_args_);
+    if (b2xx_hint) {
+        append_device_arg_if_missing(effective_device_args_, "recv_frame_size", "1024");
+    }
+
+    usrp_ = uhd::usrp::multi_usrp::make(effective_device_args_);
+
+    if (b2xx_hint && !has_device_arg_key(effective_device_args_, "master_clock_rate")) {
+        const double mcr = choose_b2xx_master_clock_rate(cfg_.sample_rate);
+        if (mcr > 0.0) {
+            usrp_->set_master_clock_rate(mcr);
+        }
+    }
 
     if (!cfg_.clock_source.empty()) {
         usrp_->set_clock_source(cfg_.clock_source);
@@ -47,6 +127,10 @@ void USRPDriver::init() {
         usrp_->set_tx_antenna(cfg_.tx_antenna);
     }
 
+    actual_master_clock_rate_ = usrp_->get_master_clock_rate();
+    actual_rx_rate_ = usrp_->get_rx_rate();
+    actual_tx_rate_ = usrp_->get_tx_rate();
+
     uhd::stream_args_t tx_args("fc32", "sc16");
     uhd::stream_args_t rx_args("fc32", "sc16");
 
@@ -59,7 +143,14 @@ void USRPDriver::init() {
 
 std::string USRPDriver::get_pp_string() const {
     if (!usrp_) return "USRP not initialized";
-    return usrp_->get_pp_string();
+
+    std::ostringstream oss;
+    oss << usrp_->get_pp_string();
+    oss << "\n[UHD CFG] effective_device_args=" << effective_device_args_;
+    oss << "\n[UHD CFG] actual_master_clock_rate=" << actual_master_clock_rate_;
+    oss << "\n[UHD CFG] actual_rx_rate=" << actual_rx_rate_;
+    oss << "\n[UHD CFG] actual_tx_rate=" << actual_tx_rate_;
+    return oss.str();
 }
 
 size_t USRPDriver::send_burst(const VecComplex& samples) {
@@ -154,6 +245,8 @@ VecComplex USRPDriver::fetch_rx_buffer() {
 
 void USRPDriver::rx_worker_loop(size_t target_samps) {
     try {
+        uhd::set_thread_priority_safe();
+
         uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
         cmd.stream_now = true;
         cmd.num_samps = 0;
@@ -181,7 +274,12 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
             if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
                 const int overflow_count =
                     rx_overflow_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-                std::cerr << "[UHD][RX] Overflow count = " << overflow_count << "\n";
+                if (overflow_count <= 5 || (overflow_count % 50) == 0) {
+                    std::cerr << "[UHD][RX] Overflow count = " << overflow_count
+                        << " recv_total=" << recv_total
+                        << " target_samps=" << target_samps
+                        << "\n";
+                }
                 continue;
             }
 

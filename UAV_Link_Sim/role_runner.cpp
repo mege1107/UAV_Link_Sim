@@ -28,7 +28,6 @@ namespace
     static constexpr size_t kSingleCarrierFileInterBurstGapSamps = 1000000;
     static constexpr auto kSingleCarrierFileListenTimeout = std::chrono::seconds(20);
     static constexpr auto kSingleCarrierFilePollInterval = std::chrono::milliseconds(250);
-
     static std::vector<std::complex<double>> compute_dft(
         const std::vector<std::complex<double>>& x)
     {
@@ -643,6 +642,7 @@ TxOnlyResult run_tx_role_once(
     log << "[CENTER FREQ] " << center_freq_hz << " Hz\n";
     log << "[INFO RATE] " << info_rate_bps << " bps\n";
     log << "[HOP PATTERN] " << hop_pattern << "\n";
+    log << "[SAMP] " << cfg.samp << "\n";
     log << "[FS] " << cfg.fs << " Hz\n";
     log << "[TX DEVICE ARGS] " << tx_device_args << "\n";
     log << "[SOURCE MODE] " << (source_mode == SourceMode::FileBits ? "FILE_BITS" : "RANDOM_BITS") << "\n";
@@ -770,6 +770,7 @@ RxOnlyResult run_rx_role_once(
     log << "[CENTER FREQ] " << center_freq_hz << " Hz\n";
     log << "[INFO RATE] " << info_rate_bps << " bps\n";
     log << "[HOP PATTERN] " << hop_pattern << "\n";
+    log << "[SAMP] " << cfg.samp << "\n";
     log << "[FS] " << cfg.fs << " Hz\n";
     log << "[RX DEVICE ARGS] " << rx_device_args << "\n";
     log << "[EXPECTED FRAMES] " << expected_frames << "\n";
@@ -908,6 +909,8 @@ RxFileResult run_rx_file_role_once(
         (cfg.fs > 0.0) ? (static_cast<double>(rx_window_samples) / cfg.fs) : 0.0;
 
     log << "[ROLE] GROUND(RX FILE AUTO)\n";
+    log << "[INFO RATE] " << info_rate_bps << " bps\n";
+    log << "[SAMP] " << cfg.samp << "\n";
     log << "[FS] " << cfg.fs << "\n";
     log << "[RX DEVICE ARGS] " << rx_device_args << "\n";
     log << "[MAX FRAMES] " << max_frames << "\n";

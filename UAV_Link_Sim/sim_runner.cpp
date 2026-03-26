@@ -28,7 +28,6 @@ static constexpr size_t kSingleCarrierUsrpPreGuardSamps = 200000;
 static constexpr size_t kSingleCarrierUsrpPostGuardSamps = 5000;
 static constexpr int kSingleCarrierUsrpRxExtraFrames = 10;
 static constexpr auto kSingleCarrierUsrpRxWarmup = std::chrono::milliseconds(50);
-
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
     std::string s;

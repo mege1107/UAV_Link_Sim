@@ -2,6 +2,7 @@
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/stream.hpp>
+#include <uhd/utils/thread_priority.hpp>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -67,4 +68,8 @@ private:
     std::thread rx_thread_;
 
     std::vector<std::complex<float>> rx_buffer_raw_;
+    std::string effective_device_args_;
+    double actual_master_clock_rate_ = 0.0;
+    double actual_rx_rate_ = 0.0;
+    double actual_tx_rate_ = 0.0;
 };
