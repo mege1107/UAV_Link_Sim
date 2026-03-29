@@ -115,6 +115,14 @@ TestResult run_ofdm_random_bit_test(
     const std::string& usrp_device_args = "type=b200",
     const ChannelConfig& ch_cfg = ChannelConfig{});
 
+TestResult run_ofdm_two_end_test(
+    RunMode mode,
+    double awgn_snr_db,
+    int tx_repeat_frames,
+    double center_freq_hz = 915e6,
+    const std::string& usrp_device_args = "type=b200",
+    const ChannelConfig& ch_cfg = ChannelConfig{});
+
 TestResult run_ofdm_file_transfer_test(
     RunMode mode,
     double awgn_snr_db,

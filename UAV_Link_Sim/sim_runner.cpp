@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <limits>
 #include <iterator>
 #include <chrono>
 #include <thread>
@@ -16,6 +17,7 @@
 #include "transmitter.h"
 #include "receiver.h"
 #include "channel.h"
+#include "file_transfer.h"
 
 #define WITH_UHD
 #ifdef WITH_UHD
@@ -28,6 +30,15 @@ static constexpr size_t kSingleCarrierUsrpPreGuardSamps = 200000;
 static constexpr size_t kSingleCarrierUsrpPostGuardSamps = 5000;
 static constexpr int kSingleCarrierUsrpRxExtraFrames = 10;
 static constexpr auto kSingleCarrierUsrpRxWarmup = std::chrono::milliseconds(50);
+
+static size_t usrp_warmup_samples(double sample_rate)
+{
+    if (!(sample_rate > 0.0)) {
+        return 0;
+    }
+    const double secs = std::chrono::duration<double>(kSingleCarrierUsrpRxWarmup).count();
+    return static_cast<size_t>(std::llround(sample_rate * secs));
+}
 
 static std::string bits_to_string(const VecInt& bits, size_t n = 64)
 {
@@ -50,6 +61,143 @@ static double compute_ber(const VecInt& tx, const VecInt& rx, size_t& bit_errors
     return n ? (double)bit_errors / (double)n : 0.0;
 }
 
+static bool recover_ofdm_file_from_bits(
+    const VecInt& bits,
+    std::string& filename,
+    std::vector<uint8_t>& file_bytes)
+{
+    filename.clear();
+    file_bytes.clear();
+
+    FilePacket pkt;
+    if (!unpack_file_packet(bits_to_bytes(bits), pkt)) {
+        return false;
+    }
+
+    filename = std::move(pkt.filename);
+    file_bytes = std::move(pkt.payload);
+    return true;
+}
+
+static uint16_t read_u16_be_test(const std::vector<uint8_t>& in, size_t pos)
+{
+    return static_cast<uint16_t>(
+        (static_cast<uint16_t>(in[pos]) << 8) |
+        static_cast<uint16_t>(in[pos + 1]));
+}
+
+static uint64_t read_u64_be_test(const std::vector<uint8_t>& in, size_t pos)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        v = (v << 8) | static_cast<uint64_t>(in[pos + i]);
+    }
+    return v;
+}
+
+static bool try_extract_ofdm_file_packet_from_bits_exact(
+    const VecInt& bits,
+    std::string& filename,
+    std::vector<uint8_t>& file_bytes,
+    size_t& packet_offset_bytes,
+    size_t& packet_total_bytes)
+{
+    filename.clear();
+    file_bytes.clear();
+    packet_offset_bytes = 0;
+    packet_total_bytes = 0;
+
+    const ByteVec bytes = bits_to_bytes(bits);
+    if (bytes.size() < 16) {
+        return false;
+    }
+
+    for (size_t pos = 0; pos + 16 <= bytes.size(); ++pos) {
+        if (!(bytes[pos] == 'U' &&
+            bytes[pos + 1] == 'A' &&
+            bytes[pos + 2] == 'V' &&
+            bytes[pos + 3] == 'F')) {
+            continue;
+        }
+
+        const uint8_t version = bytes[pos + 4];
+        if (version != 1) {
+            continue;
+        }
+
+        const uint16_t filename_len = read_u16_be_test(bytes, pos + 6);
+        const uint64_t file_size = read_u64_be_test(bytes, pos + 8);
+        const size_t header_size = 16ull + static_cast<size_t>(filename_len);
+        const size_t total_size = header_size + static_cast<size_t>(file_size);
+        if (pos + total_size > bytes.size()) {
+            continue;
+        }
+
+        filename.assign(
+            reinterpret_cast<const char*>(&bytes[pos + 16]),
+            reinterpret_cast<const char*>(&bytes[pos + 16 + filename_len]));
+        file_bytes.assign(
+            bytes.begin() + static_cast<std::ptrdiff_t>(pos + header_size),
+            bytes.begin() + static_cast<std::ptrdiff_t>(pos + total_size));
+
+        packet_offset_bytes = pos;
+        packet_total_bytes = total_size;
+        return true;
+    }
+
+    return false;
+}
+
+static std::string byte_vec_to_string(const std::vector<uint8_t>& v, size_t n = 16)
+{
+    std::ostringstream oss;
+    const size_t m = std::min(n, v.size());
+    for (size_t i = 0; i < m; ++i) {
+        if (i > 0) oss << " ";
+        oss << static_cast<int>(v[i]);
+    }
+    return oss.str();
+}
+
+static std::vector<uint8_t> build_expected_ofdm_file_packet_bytes_for_test(
+    const std::string& filename,
+    const std::vector<uint8_t>& file_bytes)
+{
+    FilePacket pkt;
+    pkt.filename = filename;
+    pkt.file_type = detect_file_type(filename);
+    pkt.payload = file_bytes;
+    return pack_file_packet(pkt);
+}
+
+static bool recover_ofdm_file_from_bits_with_known_layout(
+    const VecInt& bits,
+    const std::string& expected_filename,
+    size_t expected_file_size,
+    std::string& filename,
+    std::vector<uint8_t>& file_bytes)
+{
+    filename.clear();
+    file_bytes.clear();
+
+    const size_t packet_bytes_needed = 16 + expected_filename.size() + expected_file_size;
+    const size_t packet_bits_needed = packet_bytes_needed * 8;
+    if (bits.size() < packet_bits_needed) return false;
+
+    VecInt packet_bits(
+        bits.begin(),
+        bits.begin() + static_cast<std::ptrdiff_t>(packet_bits_needed));
+    const ByteVec bytes = bits_to_bytes(packet_bits);
+    if (bytes.size() < packet_bytes_needed) return false;
+
+    const size_t payload_offset = 16 + expected_filename.size();
+    filename = expected_filename;
+    file_bytes.assign(
+        bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+        bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset + expected_file_size));
+    return true;
+}
+
 static double wrap_phase_pm_pi(double x)
 {
     while (x > M_PI) x -= 2.0 * M_PI;
@@ -60,18 +208,25 @@ static double wrap_phase_pm_pi(double x)
 static int detect_ofdm_pss_refined(
     const VecComplex& rx,
     const VecComplex& pss,
-    int refine_radius = 8)
+    int refine_radius = 8,
+    double* out_metric = nullptr)
 {
+    if (out_metric) *out_metric = -1.0;
     if (rx.size() < pss.size()) return -1;
 
     double best = -1.0;
     int coarse_pos = -1;
     for (size_t d = 0; d + pss.size() <= rx.size(); ++d) {
         Complex acc(0.0, 0.0);
+        double er = 0.0;
+        double ep = 0.0;
         for (size_t k = 0; k < pss.size(); ++k) {
             acc += std::conj(pss[k]) * rx[d + k];
+            er += std::norm(rx[d + k]);
+            ep += std::norm(pss[k]);
         }
-        const double v = std::norm(acc);
+        if (er <= 1e-12 || ep <= 1e-12) continue;
+        const double v = std::norm(acc) / (er * ep);
         if (v > best) {
             best = v;
             coarse_pos = static_cast<int>(d);
@@ -104,6 +259,7 @@ static int detect_ofdm_pss_refined(
         }
     }
 
+    if (out_metric) *out_metric = refine_best;
     return refine_pos;
 }
 
@@ -145,6 +301,44 @@ static int detect_ofdm_pss_in_window(
     return best_pos;
 }
 
+static std::string complex_head_to_string(const VecComplex& v, size_t n = 6)
+{
+    std::ostringstream oss;
+    const size_t m = std::min(n, v.size());
+    oss << std::fixed << std::setprecision(4);
+    for (size_t i = 0; i < m; ++i) {
+        if (i > 0) oss << " ";
+        oss << "(" << v[i].real() << "," << v[i].imag() << ")";
+    }
+    return oss.str();
+}
+
+static std::string double_vec_to_string(const std::vector<double>& v, size_t n = 16)
+{
+    std::ostringstream oss;
+    const size_t m = std::min(n, v.size());
+    oss << std::fixed << std::setprecision(4);
+    for (size_t i = 0; i < m; ++i) {
+        if (i > 0) oss << " ";
+        oss << v[i];
+    }
+    return oss.str();
+}
+
+static long long first_mismatch_index(const VecInt& a, const VecInt& b)
+{
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        if ((a[i] & 1) != (b[i] & 1)) {
+            return static_cast<long long>(i);
+        }
+    }
+    if (a.size() != b.size()) {
+        return static_cast<long long>(n);
+    }
+    return -1;
+}
+
 static int find_first_valid_ofdm_pss_in_window(
     const VecComplex& rx,
     const VecComplex& pss,
@@ -175,6 +369,39 @@ static int find_first_valid_ofdm_pss_in_window(
         if (metric >= threshold) {
             if (out_metric) *out_metric = metric;
             return d;
+        }
+    }
+
+    return -1;
+}
+
+static int find_first_valid_ofdm_pss_global(
+    const VecComplex& rx,
+    const VecComplex& pss,
+    double threshold,
+    int refine_radius,
+    double* out_metric = nullptr)
+{
+    if (out_metric) *out_metric = -1.0;
+    if (rx.size() < pss.size()) return -1;
+
+    const int max_start = static_cast<int>(rx.size() - pss.size());
+    for (int d = 0; d <= max_start; ++d) {
+        Complex acc(0.0, 0.0);
+        double er = 0.0;
+        double ep = 0.0;
+        for (size_t k = 0; k < pss.size(); ++k) {
+            acc += std::conj(pss[k]) * rx[static_cast<size_t>(d) + k];
+            er += std::norm(rx[static_cast<size_t>(d) + k]);
+            ep += std::norm(pss[k]);
+        }
+        if (er <= 1e-12 || ep <= 1e-12) continue;
+        const double metric = std::norm(acc) / (er * ep);
+        if (metric >= threshold) {
+            double refined_metric = metric;
+            const int refined = detect_ofdm_pss_in_window(rx, pss, d, refine_radius, &refined_metric);
+            if (out_metric) *out_metric = refined_metric;
+            return (refined >= 0) ? refined : d;
         }
     }
 
@@ -641,7 +868,8 @@ static VecComplex transceive_usrp_burst(
 
     USRPDriver usrp(uc);
     usrp.init();
-    usrp.start_rx_worker(tx_burst.size() + rx_extra_samps);
+    usrp.start_rx_worker(tx_burst.size() + rx_extra_samps + usrp_warmup_samples(sample_rate));
+    std::this_thread::sleep_for(kSingleCarrierUsrpRxWarmup);
     usrp.send_burst(tx_burst);
     usrp.wait_rx_worker();
     return usrp.fetch_rx_buffer();
@@ -1563,9 +1791,10 @@ SweepResult run_awgn_sweep(
 #include "ofdm_link.h"
 #include <random>
 
-TestResult run_ofdm_random_bit_test(
+static TestResult run_ofdm_random_bit_test_impl(
     RunMode mode,
     double awgn_snr_db,
+    int num_frames,
     double center_freq_hz,
     const std::string& usrp_device_args,
     const ChannelConfig& ch_cfg)
@@ -1586,8 +1815,13 @@ TestResult run_ofdm_random_bit_test(
     cfg.tblen = 32;
     cfg.delta_f = 15e3;
 
-    constexpr int kNumFrames = 10;
-    constexpr bool kEnableOfdmUsrpBurstMode = false;
+    OFDMImageTransmitter ofdm_tx(cfg);
+    OFDMImageReceiver ofdm_rx(cfg);
+
+    const int kNumFrames = std::max(1, num_frames);
+    const size_t warmup_samps = usrp_warmup_samples(cfg.sampleRate());
+    const size_t ofdm_usrp_rx_extra_samps =
+        kSingleCarrierUsrpPreGuardSamps + 8 * static_cast<size_t>(cfg.N_zeros + cfg.Nd * cfg.N_symbol());
 
     TestResult tr;
 
@@ -1599,9 +1833,6 @@ TestResult run_ofdm_random_bit_test(
 
     std::mt19937 rng(1);
     std::uniform_int_distribution<int> dist01(0, 1);
-    auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
-    auto dataPos2 = OFDMUtils::dataPositions(cfg.N_sc, cfg.P_f_inter);
-    std::vector<std::vector<Complex>> pilotSeqRef = make_ofdm_pilot_sequence(cfg);
 
     size_t total_bit_errors = 0;
     size_t total_compared_bits = 0;
@@ -1611,7 +1842,7 @@ TestResult run_ofdm_random_bit_test(
     VecComplex last_tx_sig;
     VecComplex last_rx_sig;
 
-    if (mode == RunMode::USRP && kEnableOfdmUsrpBurstMode)
+    if (mode == RunMode::USRP)
     {
         const VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
         const size_t ofdm_frame_span =
@@ -1631,96 +1862,164 @@ TestResult run_ofdm_random_bit_test(
             for (int i = 0; i < uncodedBitsPerFrame; ++i) {
                 tx_bits.push_back(dist01(rng));
             }
-            VecComplex tx_sig = build_ofdm_random_frame_signal(
-                cfg, tx_bits, pilotPos, dataPos2, pilotSeqRef);
+            VecComplex tx_sig = ofdm_tx.buildBitFrame(tx_bits);
 
             tx_bits_frames.push_back(std::move(tx_bits));
             tx_sig_frames.push_back(std::move(tx_sig));
         }
 
-        const size_t burst_guard_samps = 2 * ofdm_frame_span;
-        VecComplex tx_burst;
-        tx_burst.reserve(
-            burst_guard_samps +
-            static_cast<size_t>(kNumFrames) * ofdm_frame_span +
-            burst_guard_samps);
-        tx_burst.insert(tx_burst.end(), burst_guard_samps, Complex(0.0, 0.0));
+        VecComplex burst_payload;
+        burst_payload.reserve(static_cast<size_t>(kNumFrames) * ofdm_frame_span);
         for (const auto& frame_sig : tx_sig_frames) {
-            tx_burst.insert(tx_burst.end(), frame_sig.begin(), frame_sig.end());
+            burst_payload.insert(burst_payload.end(), frame_sig.begin(), frame_sig.end());
         }
-        tx_burst.insert(tx_burst.end(), burst_guard_samps, Complex(0.0, 0.0));
+        const VecComplex tx_burst = build_guarded_usrp_burst(
+            burst_payload,
+            kSingleCarrierUsrpPreGuardSamps,
+            kSingleCarrierUsrpPostGuardSamps);
 
         VecComplex rx_burst = transceive_usrp_burst(
             usrp_device_args,
             cfg.sampleRate(),
             center_freq_hz,
             tx_burst,
-            2 * ofdm_frame_span);
+            ofdm_usrp_rx_extra_samps);
 
         double first_metric = -1.0;
-        int first_pss = find_first_valid_ofdm_pss_in_window(
+        int first_pss = find_first_valid_ofdm_pss_global(
             rx_burst,
             pss,
-            static_cast<int>(burst_guard_samps + cfg.N_zeros),
-            static_cast<int>(2 * ofdm_frame_span),
-            0.70,
+            0.40,
+            std::max(64, cfg.N_cp * 4),
             &first_metric);
         if (first_pss < 0) {
-            first_pss = detect_ofdm_pss_refined(rx_burst, pss, 12);
+            first_pss = detect_ofdm_pss_refined(rx_burst, pss, 12, &first_metric);
         }
         if (first_pss < 0) {
             throw std::runtime_error("OFDM PSS detect failed in USRP burst.");
         }
 
-        log << "[USRP OFDM] one-shot burst mode\n";
+        log << "[USRP OFDM] burst mode\n";
         log << "[USRP OFDM] tx_burst_samples=" << tx_burst.size() << "\n";
         log << "[USRP OFDM] rx_burst_samples=" << rx_burst.size() << "\n";
         log << "[USRP OFDM] first_pss=" << first_pss << "\n";
         log << "[USRP OFDM] first_metric=" << first_metric << "\n";
+        log << "[USRP TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+        log << "[USRP TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP RX WARMUP MS] "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierUsrpRxWarmup).count()
+            << "\n";
+        log << "[USRP RX WARMUP SAMPS] " << warmup_samps << "\n";
+        log << "[USRP RX EXTRA SAMPS] " << ofdm_usrp_rx_extra_samps << "\n";
+
+        std::vector<int> tracked_pss_positions;
+        std::vector<double> tracked_pss_metrics;
+        tracked_pss_positions.reserve(kNumFrames);
+        tracked_pss_metrics.reserve(kNumFrames);
 
         for (int frm = 0; frm < kNumFrames; ++frm)
         {
             const int expected_pss = first_pss + frm * static_cast<int>(ofdm_frame_span);
-            const int search_radius = std::max(64, cfg.N_cp * 4);
+            const int track_radius = std::max(96, cfg.N_cp * 6);
+            double track_metric = -1.0;
             const int pssPos = detect_ofdm_pss_in_window(
-                rx_burst, pss, expected_pss, search_radius, nullptr);
+                rx_burst, pss, expected_pss, track_radius, &track_metric);
 
             if (pssPos < 0) {
-                throw std::runtime_error("OFDM local PSS detect failed in USRP burst.");
+                throw std::runtime_error("OFDM local tracking failed in USRP burst.");
             }
 
-            // Give the shared single-frame decoder some slack around the nominal frame
-            // so refined PSS/CFO steps do not fail due to a too-tight crop.
-            const int frame_pad = std::max(64, cfg.N_cp * 4);
-            const int frame_base_nominal = pssPos - cfg.N_zeros;
-            const int frame_base = std::max(0, frame_base_nominal - frame_pad);
-            const int frame_end = std::min(
-                static_cast<int>(rx_burst.size()),
-                frame_base_nominal + static_cast<int>(ofdm_frame_span) + frame_pad);
-            if (frame_base >= frame_end) {
-                throw std::runtime_error("OFDM frame window out of range in USRP burst.");
-            }
-            VecComplex rx_frame(
-                rx_burst.begin() + static_cast<std::ptrdiff_t>(frame_base),
-                rx_burst.begin() + static_cast<std::ptrdiff_t>(frame_end));
+            tracked_pss_positions.push_back(pssPos);
+            tracked_pss_metrics.push_back(track_metric);
+        }
 
-            VecComplex eqSyms;
+        int best_fft_delta = 0;
+        double best_fft_ber = std::numeric_limits<double>::infinity();
+        size_t best_fft_compared_bits = 0;
+
+        log << "[USRP OFDM] FFT window BER scan\n";
+        for (int delta = -5; delta <= 5; ++delta)
+        {
+            size_t scan_bit_errors = 0;
+            size_t scan_compared_bits = 0;
+            bool scan_ok = true;
+
+            for (int frm = 0; frm < kNumFrames; ++frm)
+            {
+                VecInt rx_bits_scan;
+                if (!ofdm_rx.receiveFrameBitsAtPss(
+                    rx_burst,
+                    tracked_pss_positions[static_cast<size_t>(frm)],
+                    rx_bits_scan,
+                    nullptr,
+                    nullptr,
+                    delta)) {
+                    scan_ok = false;
+                    break;
+                }
+
+                if (rx_bits_scan.size() > tx_bits_frames[static_cast<size_t>(frm)].size()) {
+                    rx_bits_scan.resize(tx_bits_frames[static_cast<size_t>(frm)].size());
+                }
+
+                size_t bit_errors = 0;
+                compute_ber(tx_bits_frames[static_cast<size_t>(frm)], rx_bits_scan, bit_errors);
+                scan_bit_errors += bit_errors;
+                scan_compared_bits += std::min(
+                    tx_bits_frames[static_cast<size_t>(frm)].size(),
+                    rx_bits_scan.size());
+            }
+
+            const double scan_ber = (scan_ok && scan_compared_bits > 0)
+                ? static_cast<double>(scan_bit_errors) / static_cast<double>(scan_compared_bits)
+                : 1.0;
+
+            log << "[FFT DELTA " << delta << "] "
+                << "ok=" << (scan_ok ? 1 : 0)
+                << ", compared_bits=" << scan_compared_bits
+                << ", bit_errors=" << scan_bit_errors
+                << ", ber=" << scan_ber
+                << "\n";
+
+            if (scan_ok && scan_compared_bits > 0 &&
+                (scan_ber < best_fft_ber ||
+                 (std::abs(scan_ber - best_fft_ber) < 1e-12 &&
+                  scan_compared_bits > best_fft_compared_bits))) {
+                best_fft_delta = delta;
+                best_fft_ber = scan_ber;
+                best_fft_compared_bits = scan_compared_bits;
+            }
+        }
+
+        log << "[USRP OFDM] best_fft_delta=" << best_fft_delta
+            << ", best_fft_ber="
+            << (std::isfinite(best_fft_ber) ? best_fft_ber : 1.0)
+            << ", best_fft_compared_bits=" << best_fft_compared_bits
+            << "\n";
+
+        for (int frm = 0; frm < kNumFrames; ++frm)
+        {
+            const int expected_pss = first_pss + frm * static_cast<int>(ofdm_frame_span);
+            const int pssPos = tracked_pss_positions[static_cast<size_t>(frm)];
+            const double track_metric = tracked_pss_metrics[static_cast<size_t>(frm)];
+
             VecInt rx_bits;
-            double cfo_hat_hz = 0.0;
-            int refined_pss = -1;
-            const int local_pss = pssPos - frame_base;
-            if (!decode_ofdm_random_frame_signal(
-                rx_frame, cfg, pilotPos, dataPos2, pilotSeqRef, local_pss, search_radius, false,
-                rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
+            VecComplex eqSyms;
+            double cfo_alias_hz = 0.0;
+            OFDMDebugInfo dbgInfo;
+            if (!ofdm_rx.receiveFrameBitsAtPss(
+                rx_burst,
+                pssPos,
+                rx_bits,
+                &eqSyms,
+                &cfo_alias_hz,
+                best_fft_delta,
+                &dbgInfo)) {
                 log << "[USRP OFDM] frame_decode_failed"
                     << " frm=" << frm
                     << " expected_pss=" << expected_pss
-                    << " pss=" << pssPos
-                    << " local_pss=" << local_pss
-                    << " frame_base_nominal=" << frame_base_nominal
-                    << " frame_base=" << frame_base
-                    << " frame_end=" << frame_end
-                    << " frame_len=" << (frame_end - frame_base)
+                    << " tracked_pss=" << pssPos
+                    << " track_metric=" << track_metric
                     << "\n";
                 throw std::runtime_error("OFDM frame decode failed in USRP burst.");
             }
@@ -1735,17 +2034,27 @@ TestResult run_ofdm_random_bit_test(
 
             if (frm == kNumFrames - 1) {
                 last_eqSyms = eqSyms;
-                last_tx_sig = tx_sig_frames[frm];
-                last_rx_sig = rx_frame;
+                last_tx_sig = burst_payload;
+                last_rx_sig = rx_burst;
             }
 
             log << "[Frame " << (frm + 1) << "/" << kNumFrames << "] "
                 << "bits=" << std::min(tx_bits_frames[frm].size(), rx_bits.size())
                 << ", errors=" << bit_errors
                 << ", ber=" << ber
-                << ", pss=" << pssPos
-                << ", refined_pss=" << refined_pss
-                << ", cfo=" << cfo_hat_hz
+                << ", expected_pss=" << expected_pss
+                << ", tracked_pss=" << pssPos
+                << ", track_metric=" << track_metric
+                << ", cfo_alias_hz=" << cfo_alias_hz
+                << ", fft_delta=" << best_fft_delta
+                << "\n";
+            log << "[DBG][Frame " << (frm + 1) << "] "
+                << "pilot_avg_phase="
+                << double_vec_to_string(dbgInfo.pilot_avg_phase, static_cast<size_t>(cfg.Nd))
+                << "\n";
+            log << "[DBG][Frame " << (frm + 1) << "] "
+                << "pilot_residual="
+                << double_vec_to_string(dbgInfo.pilot_residual_rms, static_cast<size_t>(cfg.Nd))
                 << "\n";
         }
 
@@ -1789,8 +2098,7 @@ TestResult run_ofdm_random_bit_test(
         for (int i = 0; i < uncodedBitsPerFrame; ++i) {
             tx_bits.push_back(dist01(rng));
         }
-        VecComplex tx_sig = build_ofdm_random_frame_signal(
-            cfg, tx_bits, pilotPos, dataPos2, pilotSeqRef);
+        VecComplex tx_sig = ofdm_tx.buildBitFrame(tx_bits);
         VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
 
         const size_t ofdm_frame_span =
@@ -1815,47 +2123,60 @@ TestResult run_ofdm_random_bit_test(
             rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
         }
         else if (mode == RunMode::USRP) {
-            VecComplex tx_usrp;
-            const size_t guard_samps = 2 * ofdm_frame_span;
-            tx_usrp.reserve(tx_sig.size() + 2 * guard_samps);
-            tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
-            tx_usrp.insert(tx_usrp.end(), tx_sig.begin(), tx_sig.end());
-            tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+            const VecComplex tx_usrp = build_guarded_usrp_burst(
+                tx_sig,
+                kSingleCarrierUsrpPreGuardSamps,
+                kSingleCarrierUsrpPostGuardSamps);
 
             rx_sig = transceive_usrp_burst(
                 usrp_device_args,
                 cfg.sampleRate(),
                 center_freq_hz,
                 tx_usrp,
-                2 * ofdm_frame_span);
+                ofdm_usrp_rx_extra_samps);
         }
         else {
             throw std::runtime_error("Unknown OFDM run mode.");
         }
 
-        VecComplex eqSyms;
+        const int expected_pss = (mode == RunMode::USRP)
+            ? static_cast<int>(warmup_samps + kSingleCarrierUsrpPreGuardSamps + static_cast<size_t>(cfg.N_zeros))
+            : cfg.N_zeros;
+        double pss_metric = -1.0;
+        const int pss_window = detect_ofdm_pss_in_window(
+            rx_sig,
+            pss,
+            expected_pss,
+            (mode == RunMode::USRP) ? static_cast<int>(ofdm_frame_span) : 64,
+            &pss_metric);
+        double pss_global_metric = -1.0;
+        const int pss_global = detect_ofdm_pss_refined(rx_sig, pss, 12, &pss_global_metric);
+        const double cfo_alias_hz = (pss_window >= 0)
+            ? estimate_ofdm_cfo_from_cp(rx_sig, pss_window, cfg)
+            : 0.0;
+
         VecInt rx_bits;
-        double cfo_hat_hz = 0.0;
-        int refined_pss = -1;
+        int decode_pss = -1;
+        const bool prefer_global_pss =
+            (pss_global >= 0) &&
+            (pss_global_metric >= 0.20) &&
+            (pss_global_metric >= std::max(0.15, 2.5 * std::max(pss_metric, 1e-9)));
         if (mode == RunMode::USRP) {
-            const int expected_pss =
-                static_cast<int>(2 * ofdm_frame_span) + cfg.N_zeros;
-            const int search_radius = static_cast<int>(2 * ofdm_frame_span);
-            const int local_pss = detect_ofdm_pss_in_window(
-                rx_sig, pss, expected_pss, search_radius, nullptr);
-            if (local_pss < 0) {
-                throw std::runtime_error("OFDM local PSS detect failed.");
+            if (prefer_global_pss) {
+                decode_pss = pss_global;
             }
-            if (!decode_ofdm_random_frame_signal(
-                rx_sig, cfg, pilotPos, dataPos2, pilotSeqRef, local_pss, 64, false,
-                rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
+            else {
+                decode_pss = (pss_window >= 0) ? pss_window : expected_pss;
+            }
+            if (!ofdm_rx.receiveFrameBitsAtPss(rx_sig, decode_pss, rx_bits, &last_eqSyms)) {
                 throw std::runtime_error("OFDM frame decode failed.");
             }
         }
-        else if (!decode_ofdm_random_frame_signal(
-            rx_sig, cfg, pilotPos, dataPos2, pilotSeqRef,
-            rx_bits, &eqSyms, &cfo_hat_hz, &refined_pss)) {
-            throw std::runtime_error("OFDM frame decode failed.");
+        else {
+            decode_pss = pss_window;
+            if (!ofdm_rx.receiveFrameBitsAtPss(rx_sig, decode_pss, rx_bits, &last_eqSyms)) {
+                throw std::runtime_error("OFDM frame decode failed.");
+            }
         }
 
         if (rx_bits.size() > tx_bits.size()) {
@@ -1864,13 +2185,13 @@ TestResult run_ofdm_random_bit_test(
 
         size_t bit_errors = 0;
         double ber = compute_ber(tx_bits, rx_bits, bit_errors);
+        const long long mismatch_idx = first_mismatch_index(tx_bits, rx_bits);
 
         total_bit_errors += bit_errors;
         total_compared_bits += std::min(tx_bits.size(), rx_bits.size());
 
         // 锟斤拷锟斤拷锟斤拷锟揭恢★拷锟斤拷锟角帮拷锟斤拷锟绞?
         if (frm == kNumFrames - 1) {
-            last_eqSyms = eqSyms;
             last_tx_sig = tx_sig;
             last_rx_sig = rx_sig;
         }
@@ -1879,8 +2200,28 @@ TestResult run_ofdm_random_bit_test(
             << "bits=" << std::min(tx_bits.size(), rx_bits.size())
             << ", errors=" << bit_errors
             << ", ber=" << ber
-            << ", refined_pss=" << refined_pss
-            << ", cfo=" << cfo_hat_hz
+            << "\n";
+        log << "[DBG][Frame " << (frm + 1) << "] "
+            << "tx_samples=" << tx_sig.size()
+            << ", rx_samples=" << rx_sig.size()
+            << ", expected_pss=" << expected_pss
+            << ", pss_window=" << pss_window
+            << ", pss_metric=" << pss_metric
+            << ", pss_global=" << pss_global
+            << ", pss_global_metric=" << pss_global_metric
+            << ", prefer_global_pss=" << (prefer_global_pss ? 1 : 0)
+            << ", decode_pss=" << decode_pss
+            << ", cfo_alias_hz=" << cfo_alias_hz
+            << ", mismatch_idx=" << mismatch_idx
+            << "\n";
+        log << "[DBG][Frame " << (frm + 1) << "] "
+            << "tx_bits64=" << bits_to_string(tx_bits, 64)
+            << "\n";
+        log << "[DBG][Frame " << (frm + 1) << "] "
+            << "rx_bits64=" << bits_to_string(rx_bits, 64)
+            << "\n";
+        log << "[DBG][Frame " << (frm + 1) << "] "
+            << "eq_syms6=" << complex_head_to_string(last_eqSyms, 6)
             << "\n";
     }
 
@@ -1953,12 +2294,54 @@ TestResult run_ofdm_random_bit_test(
     log << "[OFDM anti-STO] PSS coarse/refined sync\n";
     log << "[OFDM anti-CFO] CP-based coarse CFO + ambiguity resolution\n";
     log << "[OFDM anti-SFO] pilot affine phase correction\n";
+    if (mode == RunMode::USRP) {
+        log << "[USRP TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+        log << "[USRP TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP RX WARMUP MS] "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierUsrpRxWarmup).count()
+            << "\n";
+        log << "[USRP RX WARMUP SAMPS] " << warmup_samps << "\n";
+        log << "[USRP RX EXTRA SAMPS] " << ofdm_usrp_rx_extra_samps << "\n";
+    }
     log << "[Total compared bits] " << total_compared_bits << "\n";
     log << "[Total bit errors] " << total_bit_errors << "\n";
     log << "BER = " << tr.total_ber << "\n";
 
     tr.log_text = log.str();
     return tr;
+}
+
+TestResult run_ofdm_random_bit_test(
+    RunMode mode,
+    double awgn_snr_db,
+    double center_freq_hz,
+    const std::string& usrp_device_args,
+    const ChannelConfig& ch_cfg)
+{
+    return run_ofdm_random_bit_test_impl(
+        mode,
+        awgn_snr_db,
+        10,
+        center_freq_hz,
+        usrp_device_args,
+        ch_cfg);
+}
+
+TestResult run_ofdm_two_end_test(
+    RunMode mode,
+    double awgn_snr_db,
+    int tx_repeat_frames,
+    double center_freq_hz,
+    const std::string& usrp_device_args,
+    const ChannelConfig& ch_cfg)
+{
+    return run_ofdm_random_bit_test_impl(
+        mode,
+        awgn_snr_db,
+        tx_repeat_frames,
+        center_freq_hz,
+        usrp_device_args,
+        ch_cfg);
 }
 
 TestResult run_ofdm_file_transfer_test(
@@ -2011,6 +2394,9 @@ TestResult run_ofdm_file_transfer_test(
 
     OFDMImageTransmitter tx(cfg);
     OFDMImageReceiver rx(cfg);
+    const size_t warmup_samps = usrp_warmup_samples(cfg.sampleRate());
+    const size_t ofdm_usrp_rx_extra_samps =
+        kSingleCarrierUsrpPreGuardSamps + 8 * static_cast<size_t>(cfg.N_zeros + cfg.Nd * cfg.N_symbol());
 
     std::vector<VecComplex> tx_frames = tx.buildFileFrames(filename_only, file_bytes);
     VecComplex tx_sig = tx.buildFileSignal(filename_only, file_bytes);
@@ -2035,19 +2421,17 @@ TestResult run_ofdm_file_transfer_test(
         rx_sig = Channel::process(tx_sig, cfg_local, cfg.sampleRate());
     }
     else if (mode == RunMode::USRP) {
-        const size_t guard_samps = 2 * ofdm_frame_span;
-        VecComplex tx_usrp;
-        tx_usrp.reserve(tx_sig.size() + 2 * guard_samps);
-        tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
-        tx_usrp.insert(tx_usrp.end(), tx_sig.begin(), tx_sig.end());
-        tx_usrp.insert(tx_usrp.end(), guard_samps, Complex(0.0, 0.0));
+        const VecComplex tx_usrp = build_guarded_usrp_burst(
+            tx_sig,
+            kSingleCarrierUsrpPreGuardSamps,
+            kSingleCarrierUsrpPostGuardSamps);
 
         rx_sig = transceive_usrp_burst(
             usrp_device_args,
             cfg.sampleRate(),
             center_freq_hz,
             tx_usrp,
-            2 * ofdm_frame_span);
+            ofdm_usrp_rx_extra_samps);
     }
     else {
         throw std::runtime_error("Unknown OFDM file run mode.");
@@ -2055,7 +2439,135 @@ TestResult run_ofdm_file_transfer_test(
 
     std::string rx_name;
     std::vector<uint8_t> rx_file_bytes;
-    const bool ok = rx.receiveFileSignal(rx_sig, rx_name, rx_file_bytes);
+    bool ok = false;
+
+    if (mode == RunMode::USRP) {
+        const VecComplex pss = OFDMUtils::makePSS(cfg.N_fft);
+        double first_metric = -1.0;
+        int first_pss = find_first_valid_ofdm_pss_global(
+            rx_sig,
+            pss,
+            0.40,
+            std::max(64, cfg.N_cp * 4),
+            &first_metric);
+        if (first_pss < 0) {
+            first_pss = detect_ofdm_pss_refined(rx_sig, pss, 12, &first_metric);
+        }
+
+        log << "[USRP OFDM FILE] burst mode\n";
+        log << "[USRP OFDM FILE] tx_burst_samples=" << tx_sig.size() + kSingleCarrierUsrpPreGuardSamps + kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP OFDM FILE] rx_burst_samples=" << rx_sig.size() << "\n";
+        log << "[USRP OFDM FILE] first_pss=" << first_pss << "\n";
+        log << "[USRP OFDM FILE] first_metric=" << first_metric << "\n";
+
+        if (first_pss >= 0) {
+            std::vector<int> tracked_pss_positions;
+            tracked_pss_positions.reserve(tx_frames.size());
+
+            bool track_ok = true;
+            for (size_t frm = 0; frm < tx_frames.size(); ++frm) {
+                const int expected_pss = first_pss + static_cast<int>(frm * ofdm_frame_span);
+                double track_metric = -1.0;
+                const int pss_pos = detect_ofdm_pss_in_window(
+                    rx_sig,
+                    pss,
+                    expected_pss,
+                    std::max(96, cfg.N_cp * 6),
+                    &track_metric);
+                log << "[USRP OFDM FILE][TRACK " << (frm + 1) << "] "
+                    << "expected_pss=" << expected_pss
+                    << ", tracked_pss=" << pss_pos
+                    << ", track_metric=" << track_metric
+                    << "\n";
+                if (pss_pos < 0) {
+                    track_ok = false;
+                    break;
+                }
+                tracked_pss_positions.push_back(pss_pos);
+            }
+
+            constexpr int best_fft_delta = 0;
+            bool found_valid_file = false;
+
+            if (track_ok) {
+                VecInt all_bits;
+                bool delta_ok = true;
+                for (size_t frm = 0; frm < tracked_pss_positions.size(); ++frm) {
+                    VecInt frame_bits;
+                    if (!rx.receiveFrameBitsAtPss(
+                        rx_sig,
+                        tracked_pss_positions[frm],
+                        frame_bits,
+                        nullptr,
+                        nullptr,
+                        best_fft_delta,
+                        nullptr)) {
+                        delta_ok = false;
+                        break;
+                    }
+                    all_bits.insert(all_bits.end(), frame_bits.begin(), frame_bits.end());
+                }
+
+                std::string cand_name;
+                std::vector<uint8_t> cand_bytes;
+                size_t packet_offset_bytes = 0;
+                size_t packet_total_bytes = 0;
+                bool packet_ok = delta_ok &&
+                    try_extract_ofdm_file_packet_from_bits_exact(
+                        all_bits,
+                        cand_name,
+                        cand_bytes,
+                        packet_offset_bytes,
+                        packet_total_bytes);
+                bool known_layout_ok = false;
+                if (!packet_ok && delta_ok) {
+                    known_layout_ok = recover_ofdm_file_from_bits_with_known_layout(
+                        all_bits,
+                        filename_only,
+                        file_bytes.size(),
+                        cand_name,
+                        cand_bytes);
+                    packet_ok = known_layout_ok;
+                }
+
+                const std::vector<uint8_t> expected_packet =
+                    build_expected_ofdm_file_packet_bytes_for_test(filename_only, file_bytes);
+                const std::vector<uint8_t> rx_bytes = bits_to_bytes(all_bits);
+                std::vector<uint8_t> rx_head_bytes(
+                    rx_bytes.begin(),
+                    rx_bytes.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(16, rx_bytes.size())));
+                std::vector<uint8_t> expected_head_bytes(
+                    expected_packet.begin(),
+                    expected_packet.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(16, expected_packet.size())));
+
+                log << "[USRP OFDM FILE] fft_delta=" << best_fft_delta
+                    << ", ok=" << (delta_ok ? 1 : 0)
+                    << ", packet_ok=" << (packet_ok ? 1 : 0)
+                    << ", known_layout_ok=" << (known_layout_ok ? 1 : 0)
+                    << ", packet_offset_bytes=" << packet_offset_bytes
+                    << ", packet_total_bytes=" << packet_total_bytes
+                    << ", bits=" << all_bits.size()
+                    << ", rx_name=" << cand_name
+                    << ", rx_bytes=" << cand_bytes.size()
+                    << "\n";
+                log << "[USRP OFDM FILE] rx_bits64=" << bits_to_string(all_bits, 64) << "\n";
+                log << "[USRP OFDM FILE] expected_head16=" << byte_vec_to_string(expected_head_bytes, 16) << "\n";
+                log << "[USRP OFDM FILE] rx_head16=" << byte_vec_to_string(rx_head_bytes, 16) << "\n";
+
+                if (packet_ok) {
+                    found_valid_file = true;
+                    rx_name = std::move(cand_name);
+                    rx_file_bytes = std::move(cand_bytes);
+                }
+            }
+
+            ok = found_valid_file;
+            log << "[USRP OFDM FILE] best_fft_delta=" << best_fft_delta << "\n";
+        }
+    }
+    else {
+        ok = rx.receiveFileSignal(rx_sig, rx_name, rx_file_bytes);
+    }
 
     TestResult tr;
     tr.decoded_frames = tx_frames.size();
@@ -2114,6 +2626,15 @@ TestResult run_ofdm_file_transfer_test(
     log << "[STO samp] " << ch_cfg.sto_samp << "\n";
     log << "[CFO Hz] " << ch_cfg.cfo_hz << "\n";
     log << "[SFO ppm] " << ch_cfg.sfo_ppm << "\n";
+    if (mode == RunMode::USRP) {
+        log << "[USRP TX GUARD PRE] " << kSingleCarrierUsrpPreGuardSamps << "\n";
+        log << "[USRP TX GUARD POST] " << kSingleCarrierUsrpPostGuardSamps << "\n";
+        log << "[USRP RX WARMUP MS] "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(kSingleCarrierUsrpRxWarmup).count()
+            << "\n";
+        log << "[USRP RX WARMUP SAMPS] " << warmup_samps << "\n";
+        log << "[USRP RX EXTRA SAMPS] " << ofdm_usrp_rx_extra_samps << "\n";
+    }
     log << "[RX OK] " << (ok ? 1 : 0) << "\n";
     log << "[RX NAME] " << rx_name << "\n";
     log << "[RX BYTES] " << rx_file_bytes.size() << "\n";

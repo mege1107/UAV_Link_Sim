@@ -64,70 +64,15 @@ namespace {
         return (s >> 31) & 1u;
     }
 
-    void appendUint16Bytes(std::vector<uint8_t>& out, uint16_t v) {
-        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-        out.push_back(static_cast<uint8_t>(v & 0xFF));
-    }
-
-    void appendUint64Bytes(std::vector<uint8_t>& out, uint64_t v) {
-        for (int i = 7; i >= 0; --i) {
-            out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
-        }
-    }
-
-    uint16_t readUint16Bytes(const std::vector<uint8_t>& data, size_t pos) {
-        return static_cast<uint16_t>(
-            (static_cast<uint16_t>(data[pos]) << 8) |
-            static_cast<uint16_t>(data[pos + 1]));
-    }
-
-    uint64_t readUint64Bytes(const std::vector<uint8_t>& data, size_t pos) {
-        uint64_t v = 0;
-        for (int i = 0; i < 8; ++i) {
-            v = (v << 8) | static_cast<uint64_t>(data[pos + i]);
-        }
-        return v;
-    }
-
-    std::string toLowerAscii(std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-            if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
-            return static_cast<char>(c);
-        });
-        return s;
-    }
-
-    uint8_t fileTypeFromFilename(const std::string& filename) {
-        const std::string lower = toLowerAscii(filename);
-        const size_t dot = lower.find_last_of('.');
-        const std::string ext = (dot == std::string::npos) ? std::string() : lower.substr(dot);
-        if (ext == ".txt") return 1;
-        if (ext == ".jpg" || ext == ".jpeg") return 2;
-        if (ext == ".mp4") return 3;
-        return 255;
-    }
-
     std::vector<uint8_t> buildFilePacketBytes(
         const std::string& filename,
         const std::vector<uint8_t>& fileBytes,
         uint8_t fileType) {
-        if (filename.size() > 65535u) {
-            throw std::runtime_error("Filename too long");
-        }
-
-        std::vector<uint8_t> packet;
-        packet.reserve(kFileHeaderBytes + filename.size() + fileBytes.size());
-        packet.push_back('U');
-        packet.push_back('A');
-        packet.push_back('V');
-        packet.push_back('F');
-        packet.push_back(1);
-        packet.push_back(fileType);
-        appendUint16Bytes(packet, static_cast<uint16_t>(filename.size()));
-        appendUint64Bytes(packet, static_cast<uint64_t>(fileBytes.size()));
-        packet.insert(packet.end(), filename.begin(), filename.end());
-        packet.insert(packet.end(), fileBytes.begin(), fileBytes.end());
-        return packet;
+        FilePacket pkt;
+        pkt.filename = filename;
+        pkt.file_type = static_cast<FileType>(fileType);
+        pkt.payload = fileBytes;
+        return pack_file_packet(pkt);
     }
 
     bool recoverFileFromPacketBits(
@@ -137,13 +82,15 @@ namespace {
         filename.clear();
         fileBytes.clear();
 
-        std::vector<uint8_t> bytes = bitsToBytesNormalized(bits);
+        std::vector<uint8_t> bytes = bits_to_bytes(bits);
         if (kEnableDebugLogs) {
             std::cout << "[DBG][OFDM FILE RX] total_bits=" << bits.size()
                 << " total_bytes=" << bytes.size() << "\n";
         }
         if (bytes.size() < kFileHeaderBytes) return false;
-        if (!(bytes[0] == 'U' && bytes[1] == 'A' && bytes[2] == 'V' && bytes[3] == 'F')) {
+
+        FilePacket pkt;
+        if (!unpack_file_packet(bytes, pkt)) {
             if (kEnableDebugLogs) {
                 std::cout << "[DBG][OFDM FILE RX] magic mismatch: "
                     << static_cast<int>(bytes[0]) << " "
@@ -153,10 +100,9 @@ namespace {
             }
             return false;
         }
-        if (bytes[4] != 1) return false;
 
-        const uint16_t filenameLen = readUint16Bytes(bytes, 6);
-        const uint64_t fileSize = readUint64Bytes(bytes, 8);
+        const uint16_t filenameLen = static_cast<uint16_t>(pkt.filename.size());
+        const uint64_t fileSize = static_cast<uint64_t>(pkt.payload.size());
         const size_t payloadOffset = kFileHeaderBytes + static_cast<size_t>(filenameLen);
         if (kEnableDebugLogs) {
             std::cout << "[DBG][OFDM FILE RX] version=" << static_cast<int>(bytes[4])
@@ -165,14 +111,8 @@ namespace {
                 << " fileSize=" << fileSize
                 << " payloadOffset=" << payloadOffset << "\n";
         }
-        if (bytes.size() < payloadOffset + static_cast<size_t>(fileSize)) return false;
-
-        filename.assign(
-            bytes.begin() + static_cast<std::ptrdiff_t>(kFileHeaderBytes),
-            bytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset));
-        fileBytes.assign(
-            bytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset),
-            bytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset + static_cast<size_t>(fileSize)));
+        filename = std::move(pkt.filename);
+        fileBytes = std::move(pkt.payload);
         return true;
     }
 
@@ -212,6 +152,35 @@ namespace {
             out[n] = signal[n] * std::conj(Complex(std::cos(ang), std::sin(ang)));
         }
         return out;
+    }
+
+    double estimateResidualPhaseFromKnownSeq(
+        const VecComplex& rx,
+        int seqPos,
+        const VecComplex& localSeq)
+    {
+        if (seqPos < 0) return 0.0;
+        if (localSeq.empty()) return 0.0;
+        if (static_cast<size_t>(seqPos) + localSeq.size() > rx.size()) return 0.0;
+
+        Complex acc(0.0, 0.0);
+        for (size_t i = 0; i < localSeq.size(); ++i) {
+            acc += rx[static_cast<size_t>(seqPos) + i] * std::conj(localSeq[i]);
+        }
+
+        const double ph = std::atan2(acc.imag(), acc.real());
+        return std::isfinite(ph) ? ph : 0.0;
+    }
+
+    void applyConstantPhaseRotation(VecComplex& signal, double phase)
+    {
+        if (signal.empty()) return;
+        if (!std::isfinite(phase) || std::abs(phase) < 1e-12) return;
+
+        const Complex rot = std::conj(Complex(std::cos(phase), std::sin(phase)));
+        for (auto& v : signal) {
+            v *= rot;
+        }
     }
 
     void fit_phase_line(const std::vector<int>& x, const std::vector<double>& y, double& a, double& b) {
@@ -333,7 +302,8 @@ namespace {
         const VecComplex& rx,
         int pssPos,
         const OFDMConfig& cfg,
-        std::vector<VecComplex>& symbolsNoCP)
+        std::vector<VecComplex>& symbolsNoCP,
+        int fftWindowDelta = 0)
     {
         symbolsNoCP.clear();
         const int pssLen = static_cast<int>(OFDMUtils::makePSS(cfg.N_fft).size());
@@ -341,7 +311,7 @@ namespace {
 
         for (int i = 0; i < cfg.Nd; ++i) {
             const int cpStart = pos0 + i * cfg.N_symbol();
-            const int dataStart = cpStart + cfg.N_cp;
+            const int dataStart = cpStart + cfg.N_cp + fftWindowDelta;
             const int dataEnd = dataStart + cfg.N_fft;
             if (dataStart < 0 || dataEnd > static_cast<int>(rx.size())) {
                 symbolsNoCP.clear();
@@ -453,6 +423,26 @@ namespace {
         return bestCfo;
     }
 
+    std::vector<std::vector<Complex>> makePilotSequenceMatlab(const OFDMConfig& cfg) {
+        auto pilotPos = OFDMUtils::pilotPositions(cfg.N_sc, cfg.P_f_inter);
+        const int pilotNum = static_cast<int>(pilotPos.size());
+        std::vector<std::vector<Complex>> pilotSeq(
+            pilotNum, std::vector<Complex>(cfg.Nd, Complex(1.0, 0.0)));
+
+        uint32_t s = 1u;
+        auto rbit = [&]() {
+            s = 1664525u * s + 1013904223u;
+            return (s >> 31) & 1u;
+        };
+
+        for (int r = 0; r < pilotNum; ++r) {
+            for (int c = 0; c < cfg.Nd; ++c) {
+                pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
+            }
+        }
+        return pilotSeq;
+    }
+
 }
 
 // =============================
@@ -461,29 +451,12 @@ namespace {
 
 VecInt OFDMUtils::bytesToBits(const std::vector<uint8_t>& bytes)
 {
-    VecInt bits;
-    bits.reserve(bytes.size() * 8);
-    for (uint8_t b : bytes) {
-        for (int i = 7; i >= 0; --i) {
-            bits.push_back((b >> i) & 1);
-        }
-    }
-    return bits;
+    return bytes_to_bits(bytes);
 }
 
 std::vector<uint8_t> OFDMUtils::bitsToBytes(const VecInt& bits)
 {
-    std::vector<uint8_t> out;
-    size_t n = bits.size() / 8;
-    out.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        uint8_t v = 0;
-        for (int k = 0; k < 8; ++k) {
-            v = static_cast<uint8_t>((v << 1) | normalizeBit(bits[i * 8 + k]));
-        }
-        out.push_back(v);
-    }
-    return out;
+    return bits_to_bytes(bits);
 }
 
 VecInt OFDMUtils::uint16ToBits(uint16_t v)
@@ -535,21 +508,27 @@ VecComplex OFDMUtils::ifft(const VecComplex& X)
 
 VecInt OFDMUtils::mseq(const std::vector<int>& seed)
 {
-    // 简化版 LFSR；这里只需要和发端/收端一致
-    std::vector<int> reg = seed;
-    if (reg.empty()) return {};
+    if (seed.empty()) return {};
 
-    const int m = static_cast<int>(reg.size());
+    const int m = static_cast<int>(seed.size());
     const int len = (1 << m) - 1;
-    VecInt seq;
-    seq.reserve(len);
+    std::vector<int> reg(m, 0);
+    reg.front() = 1;
+    reg.back() = 1;
 
+    VecInt seq(len, 0);
     for (int i = 0; i < len; ++i) {
-        int out = reg.back();
-        seq.push_back(out);
+        seq[i] = reg.back();
 
-        int fb = reg[m - 1] ^ reg[m - 2];
-        for (int k = m - 1; k > 0; --k) reg[k] = reg[k - 1];
+        int fb = 0;
+        for (int k = 0; k < m; ++k) {
+            fb += normalizeBit(seed[k]) * normalizeBit(reg[k]);
+        }
+        fb &= 1;
+
+        for (int k = m - 1; k > 0; --k) {
+            reg[k] = reg[k - 1];
+        }
         reg[0] = fb;
     }
     return seq;
@@ -590,93 +569,83 @@ VecComplex OFDMUtils::qamMod(const VecInt& bits, int M)
 {
     const int k = log2Int(M);
     if ((1 << k) != M) throw std::runtime_error("M must be power of 2");
+    const int mSide = static_cast<int>(std::round(std::sqrt(static_cast<double>(M))));
+    if (mSide * mSide != M) throw std::runtime_error("Only square QAM is supported");
+    const int axisBits = k / 2;
+    if (axisBits * 2 != k) throw std::runtime_error("QAM bit width must be even");
 
     VecComplex syms;
     syms.reserve((bits.size() + k - 1) / k);
 
-    if (M == 4) {
-        // QPSK / 4QAM
-        for (size_t i = 0; i < bits.size(); i += 2) {
-            int b0 = (i < bits.size()) ? bits[i] : 0;
-            int b1 = (i + 1 < bits.size()) ? bits[i + 1] : 0;
-            double I = (b0 == 0) ? -1.0 : 1.0;
-            double Q = (b1 == 0) ? -1.0 : 1.0;
-            syms.emplace_back(I, Q);
+    auto grayToBinary = [](int g) {
+        int b = 0;
+        for (; g > 0; g >>= 1) {
+            b ^= g;
         }
-        for (auto& s : syms) s /= std::sqrt(2.0);
-        return syms;
+        return b;
+    };
+
+    for (size_t i = 0; i < bits.size(); i += static_cast<size_t>(k)) {
+        int axisGrayI = 0;
+        int axisGrayQ = 0;
+        for (int b = 0; b < axisBits; ++b) {
+            const int bitI = (i + static_cast<size_t>(b) < bits.size()) ? normalizeBit(bits[i + b]) : 0;
+            const int bitQ = (i + static_cast<size_t>(axisBits + b) < bits.size()) ? normalizeBit(bits[i + axisBits + b]) : 0;
+            axisGrayI |= (bitI << b);
+            axisGrayQ |= (bitQ << b);
+        }
+
+        const int axisBinI = grayToBinary(axisGrayI);
+        const int axisBinQ = grayToBinary(axisGrayQ);
+        const double levelI = 2.0 * static_cast<double>(axisBinI) - static_cast<double>(mSide - 1);
+        const double levelQ = 2.0 * static_cast<double>(axisBinQ) - static_cast<double>(mSide - 1);
+        syms.emplace_back(levelI, levelQ);
     }
 
-    if (M == 16) {
-        for (size_t i = 0; i < bits.size(); i += 4) {
-            int b0 = (i < bits.size()) ? bits[i] : 0;
-            int b1 = (i + 1 < bits.size()) ? bits[i + 1] : 0;
-            int b2 = (i + 2 < bits.size()) ? bits[i + 2] : 0;
-            int b3 = (i + 3 < bits.size()) ? bits[i + 3] : 0;
-
-            auto map2 = [](int a, int b) {
-                int v = (a << 1) | b;
-                switch (v) {
-                case 0: return -3.0;
-                case 1: return -1.0;
-                case 3: return  1.0;
-                case 2: return  3.0;
-                }
-                return -3.0;
-                };
-
-            double I = map2(b0, b1);
-            double Q = map2(b2, b3);
-            syms.emplace_back(I, Q);
-        }
-        for (auto& s : syms) s /= std::sqrt(10.0);
-        return syms;
-    }
-
-    throw std::runtime_error("Only M=4/16 currently implemented");
+    return syms;
 }
 
 VecInt OFDMUtils::qamDemod(const VecComplex& syms, int M)
 {
     VecInt bits;
+    const int k = log2Int(M);
+    const int mSide = static_cast<int>(std::round(std::sqrt(static_cast<double>(M))));
+    if (mSide * mSide != M) throw std::runtime_error("Only square QAM is supported");
+    const int axisBits = k / 2;
+    if (axisBits * 2 != k) throw std::runtime_error("QAM bit width must be even");
 
-    if (M == 4) {
-        bits.reserve(syms.size() * 2);
-        for (const auto& s : syms) {
-            bits.push_back(s.real() >= 0 ? 1 : 0);
-            bits.push_back(s.imag() >= 0 ? 1 : 0);
+    auto binaryToGray = [](int b) {
+        return b ^ (b >> 1);
+    };
+
+    bits.reserve(syms.size() * static_cast<size_t>(k));
+    for (const auto& s : syms) {
+        const int axisBinI = std::max(0, std::min(
+            mSide - 1,
+            static_cast<int>(std::llround((s.real() + static_cast<double>(mSide - 1)) / 2.0))));
+        const int axisBinQ = std::max(0, std::min(
+            mSide - 1,
+            static_cast<int>(std::llround((s.imag() + static_cast<double>(mSide - 1)) / 2.0))));
+
+        const int axisGrayI = binaryToGray(axisBinI);
+        const int axisGrayQ = binaryToGray(axisBinQ);
+
+        for (int b = 0; b < axisBits; ++b) {
+            bits.push_back((axisGrayI >> b) & 1);
         }
-        return bits;
+        for (int b = 0; b < axisBits; ++b) {
+            bits.push_back((axisGrayQ >> b) & 1);
+        }
     }
 
-    if (M == 16) {
-        bits.reserve(syms.size() * 4);
-
-        auto dec2 = [](double x) {
-            if (x < -2.0) return std::pair<int, int>{0, 0};
-            if (x < 0.0) return std::pair<int, int>{0, 1};
-            if (x < 2.0) return std::pair<int, int>{1, 1};
-            return std::pair<int, int>{1, 0};
-            };
-
-        for (auto s : syms) {
-            s *= std::sqrt(10.0);
-            auto [b0, b1] = dec2(s.real());
-            auto [b2, b3] = dec2(s.imag());
-            bits.push_back(b0); bits.push_back(b1);
-            bits.push_back(b2); bits.push_back(b3);
-        }
-        return bits;
-    }
-
-    throw std::runtime_error("Only M=4/16 currently implemented");
+    return bits;
 }
 
 VecInt OFDMUtils::convEncode_171_133(const VecInt& bits)
 {
-    // rate 1/2, K=7, g0=171(oct), g1=133(oct)
-    const int g0 = 0x79;
-    const int g1 = 0x5B;
+    // MATLAB: poly2trellis(7,[133 171])
+    const int g0 = 0x5B; // 133(oct)
+    const int g1 = 0x79; // 171(oct)
     int state = 0;
     VecInt out;
     out.reserve(bits.size() * 2);
@@ -717,8 +686,8 @@ VecInt OFDMUtils::viterbiDecodeHard_171_133(const VecInt& bits, int tblen)
         return p;
         };
 
-    const int g0 = 0x79;
-    const int g1 = 0x5B;
+    const int g0 = 0x5B; // 133(oct)
+    const int g1 = 0x79; // 171(oct)
 
     for (size_t t = 0; t < T; ++t) {
         int r0 = bits[2 * t];
@@ -788,12 +757,23 @@ std::vector<Complex> OFDMUtils::linearInterpChannel(
     for (size_t i = 0; i < dataPos.size(); ++i) {
         int x = dataPos[i];
 
-        if (x <= pilotPos.front()) {
+        if (pilotPos.size() == 1) {
             H[i] = hp.front();
             continue;
         }
+        if (x <= pilotPos.front()) {
+            const int x0 = pilotPos[0];
+            const int x1 = pilotPos[1];
+            const double a = (x - x0) / static_cast<double>(x1 - x0);
+            H[i] = hp[0] * (1.0 - a) + hp[1] * a;
+            continue;
+        }
         if (x >= pilotPos.back()) {
-            H[i] = hp.back();
+            const size_t k = pilotPos.size() - 2;
+            const int x0 = pilotPos[k];
+            const int x1 = pilotPos[k + 1];
+            const double a = (x - x0) / static_cast<double>(x1 - x0);
+            H[i] = hp[k] * (1.0 - a) + hp[k + 1] * a;
             continue;
         }
 
@@ -846,6 +826,27 @@ OFDMImageTransmitter::OFDMImageTransmitter(const OFDMConfig& cfg)
 {
 }
 
+VecComplex OFDMImageTransmitter::buildBitFrame(const VecInt& bits)
+{
+    std::vector<VecComplex> frames = buildFramesFromBitstream(bits);
+    if (frames.empty()) return {};
+    return frames.front();
+}
+
+VecComplex OFDMImageTransmitter::buildBitSignal(const VecInt& bitstream)
+{
+    std::vector<VecComplex> frames = buildFramesFromBitstream(bitstream);
+    VecComplex total;
+    size_t totalSamples = 0;
+    for (const auto& frame : frames) totalSamples += frame.size();
+    total.reserve(totalSamples);
+
+    for (const auto& frame : frames) {
+        total.insert(total.end(), frame.begin(), frame.end());
+    }
+    return total;
+}
+
 std::vector<VecComplex> OFDMImageTransmitter::buildFramesFromBitstream(const VecInt& bitstream) const
 {
     const int payloadBitsPerFrame = calcPayloadBitsPerFrame();
@@ -896,7 +897,7 @@ std::vector<VecComplex> OFDMImageTransmitter::buildFileFrames(
     const std::vector<uint8_t>& fileBytes)
 {
     const std::vector<uint8_t> packetBytes =
-        buildFilePacketBytes(filename, fileBytes, fileTypeFromFilename(filename));
+        buildFilePacketBytes(filename, fileBytes, static_cast<uint8_t>(detect_file_type(filename)));
     const VecInt packetBits = OFDMUtils::bytesToBits(packetBytes);
 
     if (kEnableDebugLogs) {
@@ -1001,17 +1002,10 @@ std::vector<std::vector<Complex>> OFDMImageTransmitter::mapToResourceGrid(const 
     // grid: N_sc x Nd
     std::vector<std::vector<Complex>> grid(cfg_.N_sc, std::vector<Complex>(cfg_.Nd, Complex(0.0, 0.0)));
 
-    // MATLAB: rand('seed',1); pilot_seq = 2*(randi([0 1],pilot_num,data_col))-1;
-    std::vector<std::vector<Complex>> pilotSeq(pilotNum, std::vector<Complex>(cfg_.Nd, Complex(1.0, 0.0)));
-    uint32_t s = 1u;
-    auto rbit = [&]() {
-        s = 1664525u * s + 1013904223u;
-        return (s >> 31) & 1u;
-        };
+    std::vector<std::vector<Complex>> pilotSeq = makePilotSequenceMatlab(cfg_);
 
     for (int r = 0; r < pilotNum; ++r) {
         for (int c = 0; c < cfg_.Nd; ++c) {
-            pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
             grid[pilotPos[r]][c] = pilotSeq[r][c];
         }
     }
@@ -1185,39 +1179,119 @@ bool OFDMImageReceiver::extractOFDMSymbols(
     int startPos,
     std::vector<VecComplex>& symbolsNoCP) const
 {
-    return extractOfdmSymbolsFromPss(rx, startPos, cfg_, symbolsNoCP);
+    return extractOfdmSymbolsFromPss(rx, startPos, cfg_, symbolsNoCP, 0);
 }
 
 void OFDMImageReceiver::cfoCompensateSimple(std::vector<VecComplex>& symbolsNoCP) const
 {
-    // 先放一个占位函数
-    // 你 MATLAB 里调的是 CFO_compensate(...)
-    // 真正完全对齐它，需要你把这个函数源码也贴出来
+    auto pilotPos = OFDMUtils::pilotPositions(cfg_.N_sc, cfg_.P_f_inter);
+    const int pilotNum = static_cast<int>(pilotPos.size());
+    if (pilotNum <= 0 || static_cast<int>(symbolsNoCP.size()) < cfg_.Nd) return;
+
+    const std::vector<std::vector<Complex>> pilotSeq = makePilotSequenceMatlab(cfg_);
+
+    std::vector<std::vector<Complex>> F(
+        pilotNum, std::vector<Complex>(cfg_.Nd, Complex(0.0, 0.0)));
+
+    for (int col = 0; col < cfg_.Nd; ++col) {
+        VecComplex Y = OFDMUtils::fft(symbolsNoCP[col]);
+        for (int n = 0; n < pilotNum; ++n) {
+            const Complex txPilot = pilotSeq[n][col];
+            if (std::abs(txPilot) > 1e-12) {
+                F[n][col] = Y[1 + pilotPos[n]] / txPilot;
+            }
+        }
+    }
+
+    constexpr int N_DFT = 256;
+    constexpr int T_DFT = 1024;
+    constexpr double kLightSpeed = 3.0e8;
+    const double T_O = 1.0 / cfg_.delta_f;
+    const double tau_max = 2.0 / kLightSpeed;
+    const double f_D_max = 500.0;
+
+    std::vector<std::vector<Complex>> efD(
+        cfg_.Nd, std::vector<Complex>(2 * T_DFT, Complex(1.0, 0.0)));
+    for (int lD = 0; lD < 2 * T_DFT; ++lD) {
+        const double fD = (static_cast<double>(lD - T_DFT) / static_cast<double>(T_DFT)) * f_D_max;
+        const Complex efD0 = cexpj(-2.0 * PI * T_O * fD);
+        for (int l = 0; l < cfg_.Nd; ++l) {
+            efD[l][lD] = std::pow(efD0, l + 1);
+        }
+    }
+
+    std::vector<std::vector<Complex>> FE(
+        pilotNum, std::vector<Complex>(2 * T_DFT, Complex(0.0, 0.0)));
+    for (int n = 0; n < pilotNum; ++n) {
+        for (int lD = 0; lD < 2 * T_DFT; ++lD) {
+            Complex acc(0.0, 0.0);
+            for (int l = 0; l < cfg_.Nd; ++l) {
+                acc += F[n][l] * efD[l][lD];
+            }
+            FE[n][lD] = acc;
+        }
+    }
+
+    double bestLambda = -1.0;
+    int bestLD = T_DFT;
+    for (int nD = 0; nD < N_DFT; ++nD) {
+        const double tau = (static_cast<double>(nD) / static_cast<double>(N_DFT)) * tau_max;
+        const Complex etau0 = cexpj(2.0 * static_cast<double>(cfg_.P_f_inter) * PI * cfg_.delta_f * tau);
+        std::vector<Complex> etau(pilotNum, Complex(1.0, 0.0));
+        for (int n = 0; n < pilotNum; ++n) {
+            etau[n] = std::pow(etau0, n + 1);
+        }
+
+        for (int lD = 0; lD < 2 * T_DFT; ++lD) {
+            Complex acc(0.0, 0.0);
+            for (int n = 0; n < pilotNum; ++n) {
+                acc += etau[n] * FE[n][lD];
+            }
+            const double lambda = std::norm(acc) / static_cast<double>(pilotNum * cfg_.Nd);
+            if (lambda > bestLambda) {
+                bestLambda = lambda;
+                bestLD = lD;
+            }
+        }
+    }
+
+    const double f_D_hat =
+        (static_cast<double>(bestLD - T_DFT) / static_cast<double>(T_DFT)) * f_D_max;
+    const double epsilon_hat = f_D_hat / cfg_.delta_f;
+
+    VecComplex compensate(cfg_.N_fft, Complex(1.0, 0.0));
+    for (int n = 0; n < cfg_.N_fft; ++n) {
+        compensate[n] = cexpj(-2.0 * PI * static_cast<double>(n + 1) * epsilon_hat / static_cast<double>(cfg_.N_fft));
+    }
+
+    for (int col = 0; col < cfg_.Nd; ++col) {
+        const Complex colRot = cexpj(
+            -2.0 * PI * static_cast<double>(cfg_.N_symbol()) * static_cast<double>(col) * epsilon_hat /
+            static_cast<double>(cfg_.N_fft));
+        for (int n = 0; n < cfg_.N_fft; ++n) {
+            symbolsNoCP[col][n] *= colRot * compensate[n];
+        }
+    }
 }
 
 bool OFDMImageReceiver::equalizeAndDemod(
     const std::vector<VecComplex>& symbolsNoCP,
-    VecInt& hardBitsOut) const
+    VecInt& hardBitsOut,
+    VecComplex* eqSymsOut,
+    OFDMDebugInfo* debugOut) const
 {
     hardBitsOut.clear();
+    if (eqSymsOut) eqSymsOut->clear();
+    if (debugOut) {
+        debugOut->pilot_avg_phase.clear();
+        debugOut->pilot_residual_rms.clear();
+    }
 
     auto pilotPos = OFDMUtils::pilotPositions(cfg_.N_sc, cfg_.P_f_inter);
     auto dataPos = OFDMUtils::dataPositions(cfg_.N_sc, cfg_.P_f_inter);
 
     const int pilotNum = static_cast<int>(pilotPos.size());
-
-    // 重建与发端一致的 pilot_seq
-    std::vector<std::vector<Complex>> pilotSeq(pilotNum, std::vector<Complex>(cfg_.Nd, Complex(1.0, 0.0)));
-    uint32_t s = 1u;
-    auto rbit = [&]() {
-        s = 1664525u * s + 1013904223u;
-        return (s >> 31) & 1u;
-        };
-    for (int r = 0; r < pilotNum; ++r) {
-        for (int c = 0; c < cfg_.Nd; ++c) {
-            pilotSeq[r][c] = Complex(rbit() ? 1.0 : -1.0, 0.0);
-        }
-    }
+    const std::vector<std::vector<Complex>> pilotSeq = makePilotSequenceMatlab(cfg_);
 
     VecComplex allEqSyms;
 
@@ -1252,6 +1326,26 @@ bool OFDMImageReceiver::equalizeAndDemod(
         double phaseBias = 0.0;
         fit_phase_line(pilotPos, pilotPhase, phaseSlope, phaseBias);
 
+        if (debugOut) {
+            double phaseSum = 0.0;
+            double residualSumSq = 0.0;
+            for (int i = 0; i < pilotNum; ++i) {
+                phaseSum += pilotPhase[i];
+                const double pred =
+                    phaseSlope * static_cast<double>(pilotPos[i]) + phaseBias;
+                const double err = wrap_phase_pm_pi(pilotPhase[i] - pred);
+                residualSumSq += err * err;
+            }
+            const double avgPhase = (pilotNum > 0)
+                ? (phaseSum / static_cast<double>(pilotNum))
+                : 0.0;
+            const double residualRms = (pilotNum > 0)
+                ? std::sqrt(residualSumSq / static_cast<double>(pilotNum))
+                : 0.0;
+            debugOut->pilot_avg_phase.push_back(avgPhase);
+            debugOut->pilot_residual_rms.push_back(residualRms);
+        }
+
         VecComplex usedPhaseCorrected = used;
         for (int k = 0; k < cfg_.N_sc; ++k) {
             const double ph = phaseSlope * static_cast<double>(k) + phaseBias;
@@ -1272,6 +1366,7 @@ bool OFDMImageReceiver::equalizeAndDemod(
         }
     }
 
+    if (eqSymsOut) *eqSymsOut = allEqSyms;
     hardBitsOut = OFDMUtils::qamDemod(allEqSyms, cfg_.M);
     return !hardBitsOut.empty();
 }
@@ -1288,17 +1383,9 @@ bool OFDMImageReceiver::decodeFramePayloadAtPss(
 
     const VecComplex pss = OFDMUtils::makePSS(cfg_.N_fft);
     const double cfoAliasHz = estimateOfdmCfoFromCp(rx, pssPos, cfg_);
-    const double cfoHatHz = resolveOfdmCfoAmbiguity(rx, pss, cfg_, cfoAliasHz);
-
-    if (kEnableDebugLogs) {
-        std::cout << "[DBG][OFDM FRAME] pssPos=" << pssPos
-            << " cfoAliasHz=" << cfoAliasHz
-            << " cfoHatHz=" << cfoHatHz << "\n";
-    }
-
     VecComplex rxWork = rx;
-    if (std::isfinite(cfoHatHz) && std::abs(cfoHatHz) > 1e-9) {
-        rxWork = applyFrequencyCorrection(rx, cfg_.sampleRate(), cfoHatHz);
+    if (std::isfinite(cfoAliasHz) && std::abs(cfoAliasHz) > 1e-9) {
+        rxWork = applyFrequencyCorrection(rx, cfg_.sampleRate(), cfoAliasHz);
     }
 
     const int refined = detectPssInWindow(
@@ -1307,23 +1394,28 @@ bool OFDMImageReceiver::decodeFramePayloadAtPss(
         refinedPssPos = refined;
     }
 
-    if (kEnableDebugLogs) {
-        std::cout << "[DBG][OFDM FRAME] pssPosAfterCfo=" << refinedPssPos << "\n";
-    }
+    const double residualPhase = estimateResidualPhaseFromKnownSeq(rxWork, refinedPssPos, pss);
+    applyConstantPhaseRotation(rxWork, residualPhase);
 
     std::vector<VecComplex> symbolsNoCP;
-    if (!extractOfdmSymbolsFromPss(rxWork, refinedPssPos, cfg_, symbolsNoCP)) {
+    if (!extractOfdmSymbolsFromPss(rxWork, refinedPssPos, cfg_, symbolsNoCP, 0)) {
         return false;
     }
 
+    cfoCompensateSimple(symbolsNoCP);
+
+    VecComplex eqSyms;
     VecInt demodBits;
-    if (!equalizeAndDemod(symbolsNoCP, demodBits)) {
+    if (!equalizeAndDemod(symbolsNoCP, demodBits, &eqSyms, nullptr)) {
         return false;
     }
 
     decodedBits = OFDMUtils::viterbiDecodeHard_171_133(demodBits, cfg_.tblen);
     if (kEnableDebugLogs) {
-        std::cout << "[DBG][OFDM FRAME] demodBits=" << demodBits.size()
+        std::cout << "[DBG][OFDM FRAME] refinedPssPos=" << refinedPssPos
+            << " cfoAliasHz=" << cfoAliasHz
+            << " residualPhase=" << residualPhase
+            << " demodBits=" << demodBits.size()
             << " decodedBits=" << decodedBits.size() << "\n";
         if (!decodedBits.empty()) {
             const std::vector<uint8_t> firstBytes =
@@ -1362,6 +1454,80 @@ bool OFDMImageReceiver::decodeFramePayload(
     const bool ok = decodeFramePayloadAtPss(rx, static_cast<int>(frameStartPos), decodedBits, refinedPssPos);
     frameStartPos = static_cast<size_t>(std::max(refinedPssPos, 0));
     return ok;
+}
+
+bool OFDMImageReceiver::receiveFrameBitsAtPss(
+    const VecComplex& rx,
+    int initialPssPos,
+    VecInt& bitsOut,
+    VecComplex* eqSymsOut,
+    double* cfoAliasHzOut,
+    int fftWindowDelta,
+    OFDMDebugInfo* debugOut)
+{
+    bitsOut.clear();
+    if (eqSymsOut) eqSymsOut->clear();
+    if (cfoAliasHzOut) *cfoAliasHzOut = 0.0;
+    if (debugOut) {
+        debugOut->pilot_avg_phase.clear();
+        debugOut->pilot_residual_rms.clear();
+    }
+    const VecComplex pss = OFDMUtils::makePSS(cfg_.N_fft);
+    int pssPos = initialPssPos;
+    if (pssPos < 0 || pssPos + static_cast<int>(pss.size()) > static_cast<int>(rx.size())) {
+        return false;
+    }
+    const double cfoAliasHz = estimateOfdmCfoFromCp(rx, pssPos, cfg_);
+    if (cfoAliasHzOut) *cfoAliasHzOut = cfoAliasHz;
+    VecComplex rxWork = rx;
+    if (std::isfinite(cfoAliasHz) && std::abs(cfoAliasHz) > 1e-9) {
+        rxWork = applyFrequencyCorrection(rx, cfg_.sampleRate(), cfoAliasHz);
+    }
+
+    const int refinedPssPos = detectPssInWindow(rxWork, pss, pssPos, std::max(24, cfg_.N_cp), nullptr);
+    if (refinedPssPos >= 0) {
+        pssPos = refinedPssPos;
+    }
+
+    const double residualPhase = estimateResidualPhaseFromKnownSeq(rxWork, pssPos, pss);
+    applyConstantPhaseRotation(rxWork, residualPhase);
+
+    std::vector<VecComplex> symbolsNoCP;
+    if (!extractOfdmSymbolsFromPss(rxWork, pssPos, cfg_, symbolsNoCP, fftWindowDelta)) return false;
+    cfoCompensateSimple(symbolsNoCP);
+
+    VecInt demodBits;
+    VecComplex eqSyms;
+    if (!equalizeAndDemod(symbolsNoCP, demodBits, &eqSyms, debugOut)) return false;
+    VecInt decoded = OFDMUtils::viterbiDecodeHard_171_133(demodBits, cfg_.tblen);
+
+    const int payloadBitsPerFrame = OFDMImageTransmitter(cfg_).calcPayloadBitsPerFrame();
+    if (payloadBitsPerFrame <= 0 || decoded.size() < static_cast<size_t>(payloadBitsPerFrame)) {
+        return false;
+    }
+
+    bitsOut.assign(
+        decoded.begin(),
+        decoded.begin() + static_cast<std::ptrdiff_t>(payloadBitsPerFrame));
+    if (eqSymsOut) *eqSymsOut = std::move(eqSyms);
+    return true;
+}
+
+bool OFDMImageReceiver::receiveFrameBits(const VecComplex& rx, VecInt& bitsOut, VecComplex* eqSymsOut)
+{
+    const VecComplex pss = OFDMUtils::makePSS(cfg_.N_fft);
+    const int pssPos = detectPSS(rx, pss);
+    if (pssPos < 0) {
+        bitsOut.clear();
+        if (eqSymsOut) eqSymsOut->clear();
+        return false;
+    }
+    return receiveFrameBitsAtPss(rx, pssPos, bitsOut, eqSymsOut, nullptr, 0, nullptr);
+}
+
+bool OFDMImageReceiver::receiveBitSignal(const VecComplex& rx, VecInt& bitsOut)
+{
+    return receiveBitstreamFromSignal(rx, bitsOut);
 }
 
 bool OFDMImageReceiver::receiveBitstreamFromSignal(const VecComplex& rx, VecInt& bitsOut) const

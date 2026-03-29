@@ -38,6 +38,12 @@ struct GrayImage
     std::vector<uint8_t> pixels; // row-major, grayscale
 };
 
+struct OFDMDebugInfo
+{
+    std::vector<double> pilot_avg_phase;
+    std::vector<double> pilot_residual_rms;
+};
+
 class OFDMUtils
 {
 public:
@@ -76,6 +82,8 @@ class OFDMImageTransmitter
 public:
     explicit OFDMImageTransmitter(const OFDMConfig& cfg);
 
+    VecComplex buildBitFrame(const VecInt& bits);
+    VecComplex buildBitSignal(const VecInt& bitstream);
     std::vector<VecComplex> buildFileFrames(const std::string& filename, const std::vector<uint8_t>& fileBytes);
     VecComplex buildFileSignal(const std::string& filename, const std::vector<uint8_t>& fileBytes);
     VecComplex buildSingleImageFrame(const GrayImage& image);
@@ -106,6 +114,16 @@ class OFDMImageReceiver
 public:
     explicit OFDMImageReceiver(const OFDMConfig& cfg);
 
+    bool receiveFrameBits(const VecComplex& rx, VecInt& bitsOut, VecComplex* eqSymsOut = nullptr);
+    bool receiveFrameBitsAtPss(
+        const VecComplex& rx,
+        int initialPssPos,
+        VecInt& bitsOut,
+        VecComplex* eqSymsOut = nullptr,
+        double* cfoAliasHzOut = nullptr,
+        int fftWindowDelta = 0,
+        OFDMDebugInfo* debugOut = nullptr);
+    bool receiveBitSignal(const VecComplex& rx, VecInt& bitsOut);
     bool receiveFileSignal(const VecComplex& rx, std::string& filename, std::vector<uint8_t>& fileBytes);
     bool receiveOneFrame(const VecComplex& rx, GrayImage& outImg);
     bool receiveImageSignal(const VecComplex& rx, GrayImage& outImg);
@@ -123,7 +141,9 @@ private:
 
     bool equalizeAndDemod(
         const std::vector<VecComplex>& symbolsNoCP,
-        VecInt& hardBitsOut) const;
+        VecInt& hardBitsOut,
+        VecComplex* eqSymsOut = nullptr,
+        OFDMDebugInfo* debugOut = nullptr) const;
     bool decodeFramePayloadAtPss(
         const VecComplex& rx,
         int pssPos,

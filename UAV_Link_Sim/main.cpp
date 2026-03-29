@@ -107,12 +107,12 @@ int main()
         // =========================
         // Unified test entry config
         // =========================
-        constexpr EntryMode kEntryMode = EntryMode::RoleTxOnly;
-        constexpr TestChain kChain = TestChain::SingleCarrierFileTransfer;
+        constexpr EntryMode kEntryMode = EntryMode::UnifiedLinkTest;
+        constexpr TestChain kChain = TestChain::OfdmFileTransfer;
         constexpr RunMode kMode = RunMode::USRP;   // AWGN / USRP / LOOPBACK
         constexpr bool kPrintLogText = true;
 
-        constexpr double kAwgnSnrDb = 20.0;
+        constexpr double kAwgnSnrDb = 50.0;
         constexpr double kCenterFreqHz = 433e6;
         const std::string kUsrpDeviceArgs = "type=b200";
         const std::string kRxUsrpDeviceArgs = "type=b200";
@@ -120,16 +120,16 @@ int main()
 
         // Single-carrier parameters
         constexpr ModulationType kSingleCarrierModulation = ModulationType::FSK;
-        constexpr int kTxRepeatFrames = 5000;
+        constexpr int kTxRepeatFrames = 60;
         constexpr double kInfoRateBps = 8000.0;
         constexpr int kHopPattern = 0;
-        constexpr SourceMode kRoleSourceMode = SourceMode::FileBits;
+        constexpr SourceMode kRoleSourceMode = SourceMode::RandomBits;
         constexpr int kRoleExpectedFrames = 120;
         constexpr int kRoleMaxFrames = 200;
 
         // File paths
-        const std::string kInputFilePath =  "D:\\linksim\\test_files\\test.txt";
-        const std::string kOutputFilePath = "D:\\linksim\\test_files\\out_main.txt";
+        const std::string kInputFilePath =  "D:\\linksim\\test_files\\test2.jpg";
+        const std::string kOutputFilePath = "D:\\linksim\\test_files\\out_main6.jpg";
 
         // OFDM channel impairments used in AWGN mode
         ChannelConfig ofdmChannelCfg;
@@ -183,9 +183,10 @@ int main()
                 break;
 
             case TestChain::OfdmRandomBits:
-                tr = run_ofdm_random_bit_test(
+                tr = run_ofdm_two_end_test(
                     kMode,
                     kAwgnSnrDb,
+                    kTxRepeatFrames,
                     kCenterFreqHz,
                     kUsrpDeviceArgs,
                     ofdmChannelCfg);
