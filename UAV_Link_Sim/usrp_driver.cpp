@@ -136,6 +136,29 @@ VecComplex USRPDriver::fetch_rx_buffer() {
     return rx_buffer_;
 }
 
+VecComplex USRPDriver::fetch_rx_samples_since(size_t start_index, size_t* out_total_samps) {
+    std::lock_guard<std::mutex> lock(rx_mutex_);
+
+    const size_t total = rx_buffer_.size();
+    if (out_total_samps) {
+        *out_total_samps = total;
+    }
+
+    if (start_index >= total) {
+        return {};
+    }
+
+    return VecComplex(
+        rx_buffer_.begin() + static_cast<long long>(start_index),
+        rx_buffer_.end()
+    );
+}
+
+size_t USRPDriver::rx_buffer_size() {
+    std::lock_guard<std::mutex> lock(rx_mutex_);
+    return rx_buffer_.size();
+}
+
 void USRPDriver::rx_worker_loop(size_t target_samps) {
     try {
         uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -176,8 +199,10 @@ void USRPDriver::rx_worker_loop(size_t target_samps) {
 
             if (n > 0) {
                 std::lock_guard<std::mutex> lock(rx_mutex_);
+                const size_t old_size = rx_buffer_.size();
+                rx_buffer_.resize(old_size + n);
                 for (size_t i = 0; i < n; ++i) {
-                    rx_buffer_.emplace_back(
+                    rx_buffer_[old_size + i] = Complex(
                         static_cast<double>(buff[i].real()),
                         static_cast<double>(buff[i].imag())
                     );
